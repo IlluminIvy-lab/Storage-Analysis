@@ -1,0 +1,1239 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Sparkles,
+  FolderLock,
+  ShieldCheck,
+  Play,
+  FileSearch,
+  CheckCircle2,
+  AlertTriangle,
+  FileText,
+  Trash2,
+  ExternalLink,
+  GitCompare,
+  RotateCcw,
+  RefreshCw,
+  FolderOpen,
+  Download,
+  Square,
+} from 'lucide-react';
+import { User } from 'firebase/auth';
+import {
+  initAuth,
+  googleSignIn,
+  logout,
+  getAccessToken,
+  getStoredToken,
+  getCachedUser,
+  isStoredTokenExpired,
+  auth,
+} from './lib/firebase';
+import {
+  findFolderByName,
+  listAllFilesInFolder,
+  readFileContent,
+  moveFileToTrash,
+  restoreFileFromTrash,
+  renameFile,
+} from './lib/driveApi';
+import { analyzeDuplicates } from './lib/duplicateAnalyzer';
+import {
+  DriveFileItem,
+  DuplicateMatch,
+  CleanupReport,
+  ScanStage,
+  CleanupMetrics,
+  HistoryAction,
+  DriveFolderItem,
+  ScanType,
+  FileTypeFilter,
+} from './types';
+import { computeScanMetrics } from './lib/formatters';
+import { isFileMatchingFilter } from './lib/scanFilterUtils';
+import { exportReportToCsv } from './lib/exportCsv';
+import { Navbar } from './components/Navbar';
+import { AuthScreen } from './components/AuthScreen';
+import { ScanProgress } from './components/ScanProgress';
+import { ConfirmationModal } from './components/ConfirmationModal';
+import { FileComparisonModal } from './components/FileComparisonModal';
+import { ReportView } from './components/ReportView';
+import { ScanMetricsCard } from './components/ScanMetricsCard';
+import { TrashBinMonitor } from './components/TrashBinMonitor';
+import { MatchesView } from './components/MatchesView';
+import { UndoActionBar } from './components/UndoActionBar';
+import { ActivityTrackerDrawer } from './components/ActivityTrackerDrawer';
+import { SmartRenameModal } from './components/SmartRenameModal';
+import { SmartFolderModal } from './components/SmartFolderModal';
+import { SmartScanReviewView } from './components/SmartScanReviewView';
+import { ScanConfigurationCard } from './components/ScanConfigurationCard';
+
+export default function App() {
+  // Restore user & Drive token from persistent session on mount
+  const [user, setUser] = useState<User | null>(
+    () => (auth.currentUser as User | null) || (getCachedUser() as unknown as User | null)
+  );
+  const [token, setToken] = useState<string | null>(() => getStoredToken());
+  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isTokenExpired, setIsTokenExpired] = useState<boolean>(() => isStoredTokenExpired());
+
+  // Active view: cleanup agent vs trash monitor
+  const [activeView, setActiveView] = useState<'cleanup' | 'trash_monitor'>('cleanup');
+  const [sessionTrashedFileIds, setSessionTrashedFileIds] = useState<string[]>([]);
+
+  // Scan configuration & state
+  const [targetFolder, setTargetFolder] = useState<DriveFolderItem>({
+    id: 'root',
+    name: 'My Drive (Root)',
+  });
+  const [scanType, setScanType] = useState<ScanType>('duplicates_and_drafts');
+  const [fileTypeFilter, setFileTypeFilter] = useState<FileTypeFilter>('all');
+  const [customExtensions, setCustomExtensions] = useState<string[]>(['.docx', '.md', '.txt']);
+
+  const folderName = targetFolder.name;
+  const [scanStage, setScanStage] = useState<ScanStage>('idle');
+  const [currentActionText, setCurrentActionText] = useState<string>('');
+  const [processedCount, setProcessedCount] = useState<number>(0);
+  const [totalCount, setTotalCount] = useState<number>(0);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [scanDurationMs, setScanDurationMs] = useState<number>(0);
+  const [scanMetrics, setScanMetrics] = useState<CleanupMetrics | null>(null);
+
+  // Results
+  const [scannedFiles, setScannedFiles] = useState<DriveFileItem[]>([]);
+  const [actionableMatches, setActionableMatches] = useState<DuplicateMatch[]>([]);
+  const [uncertainMatches, setUncertainMatches] = useState<DuplicateMatch[]>([]);
+  const [uniqueFiles, setUniqueFiles] = useState<DriveFileItem[]>([]);
+  const [report, setReport] = useState<CleanupReport | null>(null);
+
+  // Modals & Enhanced Features
+  const [isConfirmationOpen, setIsConfirmationOpen] = useState<boolean>(false);
+  const [selectedComparison, setSelectedComparison] = useState<DuplicateMatch | null>(null);
+  const [isTrashing, setIsTrashing] = useState<boolean>(false);
+
+  // Bulk selection & smart intelligence state
+  const [selectedMatchIds, setSelectedMatchIds] = useState<string[]>([]);
+  const [keptMatchIds, setKeptMatchIds] = useState<string[]>([]);
+  const [smartRenameTargetFile, setSmartRenameTargetFile] = useState<DriveFileItem | null>(null);
+  const [smartFolderTargetFile, setSmartFolderTargetFile] = useState<DriveFileItem | null>(null);
+
+  // Activity Tracker & 7-10s Undo Action
+  const [recentActions, setRecentActions] = useState<HistoryAction[]>([]);
+  const [activeUndoAction, setActiveUndoAction] = useState<HistoryAction | null>(null);
+  const [isActivityTrackerOpen, setIsActivityTrackerOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    // Listen for Drive API 401 unauthorized signals to prompt a 1-tap refresh
+    const handleAuthExpired = () => {
+      setIsTokenExpired(true);
+    };
+    window.addEventListener('drive_auth_expired', handleAuthExpired);
+
+    const unsubscribe = initAuth(
+      (currentUser, accessToken) => {
+        setUser(currentUser);
+        if (accessToken) {
+          setToken(accessToken);
+          setIsTokenExpired(false);
+        }
+      },
+      () => {
+        // Only clear if auth truly signed out
+        setUser(null);
+        setToken(null);
+        setIsTokenExpired(false);
+      }
+    );
+
+    return () => {
+      window.removeEventListener('drive_auth_expired', handleAuthExpired);
+      unsubscribe();
+    };
+  }, []);
+
+  const handleSignIn = async () => {
+    setIsLoggingIn(true);
+    setAuthError(null);
+    try {
+      const result = await googleSignIn();
+      if (result) {
+        setUser(result.user);
+        setToken(result.accessToken);
+        setIsTokenExpired(false);
+      }
+    } catch (err: any) {
+      console.error('Sign-in failed:', err);
+      setAuthError(err.message || 'Failed to authenticate with Google Drive.');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleRefreshToken = async () => {
+    setIsLoggingIn(true);
+    setAuthError(null);
+    try {
+      const result = await googleSignIn({ loginHint: user?.email || undefined });
+      if (result) {
+        setUser(result.user);
+        setToken(result.accessToken);
+        setIsTokenExpired(false);
+      }
+    } catch (err: any) {
+      console.error('Session refresh failed:', err);
+      setAuthError(err.message || 'Failed to refresh Google Drive connection.');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await logout();
+    setUser(null);
+    setToken(null);
+    setIsTokenExpired(false);
+    setScanStage('idle');
+    setReport(null);
+    setScannedFiles([]);
+    setActionableMatches([]);
+    setUncertainMatches([]);
+    setKeptMatchIds([]);
+  };
+
+  // Workflow cancellation ref and handler
+  const isCancelledRef = useRef<boolean>(false);
+
+  const handleStopWorkflow = () => {
+    isCancelledRef.current = true;
+    setIsTrashing(false);
+    setIsConfirmationOpen(false);
+    setScanStage('idle');
+    setCurrentActionText('Workflow stopped by user.');
+  };
+
+  // Fetch AI Cleanup Insight via Gemini API
+  const fetchGeminiInsight = async (
+    currentReport: CleanupReport,
+    matchesForInsight?: DuplicateMatch[]
+  ) => {
+    setReport((prev) => (prev ? { ...prev, isLoadingInsight: true } : null));
+
+    try {
+      const listToProcess = matchesForInsight || actionableMatches;
+      const matchesPayload =
+        listToProcess.length > 0
+          ? listToProcess.map((m) => ({
+              name: m.targetFile.name,
+              originalName: m.originalFile.name,
+              type: m.type,
+              reason: m.reason,
+            }))
+          : currentReport.trashedFiles.map((t) => ({
+              name: t.trashedFile.name,
+              originalName: t.keptOriginalFile.name,
+              type: t.type,
+              reason: t.reason,
+            }));
+
+      const response = await fetch('/api/gemini/cleanup-insight', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          folderName: currentReport.folderName,
+          matches: matchesPayload,
+          totalScanned: currentReport.totalFilesReviewed,
+          totalUniqueKept: currentReport.totalUniqueKept,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.insight) {
+          setReport((prev) =>
+            prev ? { ...prev, cleanupInsight: data.insight, isLoadingInsight: false } : null
+          );
+          return;
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch Gemini cleanup insight:', err);
+    }
+
+    setReport((prev) =>
+      prev
+        ? {
+            ...prev,
+            cleanupInsight:
+              'Most duplicates identified are older revision drafts and redundant copies of your working documents.',
+            isLoadingInsight: false,
+          }
+        : null
+    );
+  };
+
+  /**
+   * Executes the cleanup workflow on the selected target folder.
+   * Runs the Smart Scan (with Review) flow, applying duplicate detection settings and file type filters.
+   */
+  const startCleanupScan = async () => {
+    const accessToken = token || getAccessToken();
+    if (!accessToken || isTokenExpired) {
+      setIsTokenExpired(true);
+      setErrorMessage('Google Workspace session requires a quick refresh. Please tap "Refresh Drive Session" above.');
+      return;
+    }
+
+    setErrorMessage(null);
+    setReport(null);
+    setActionableMatches([]);
+    setUncertainMatches([]);
+    setScannedFiles([]);
+    setScanMetrics(null);
+    setKeptMatchIds([]);
+    isCancelledRef.current = false;
+    const startTime = Date.now();
+
+    try {
+      // Step 1: Target folder verification
+      setScanStage('locating_folder');
+      setCurrentActionText(`Targeting folder "${targetFolder.name}" in Drive (skipping "Craft")...`);
+
+      const targetFolderId = targetFolder.id || 'root';
+      const targetFolderName = targetFolder.name || 'My Drive';
+
+      // Strict safety: Never allow scanning a folder named "Craft"
+      if (targetFolderName.toLowerCase() === 'craft') {
+        throw new Error('Access to the "Craft" folder is strictly restricted per policy.');
+      }
+
+      if (isCancelledRef.current) return;
+
+      // Step 2: Enumerate files (excluding Craft and 00_README.txt)
+      setScanStage('fetching_files');
+      setCurrentActionText(`Enumerating files in "${targetFolderName}" (ignoring 00_README.txt)...`);
+
+      const enumeratedFiles = await listAllFilesInFolder(
+        targetFolderId,
+        accessToken,
+        (count) => {
+          setCurrentActionText(`Found ${count} file${count === 1 ? '' : 's'} in "${targetFolderName}"...`);
+        }
+      );
+
+      if (isCancelledRef.current) return;
+
+      // Apply File Type Filter
+      const rawFiles = enumeratedFiles.filter((file) =>
+        isFileMatchingFilter(file, fileTypeFilter, customExtensions)
+      );
+
+      if (rawFiles.length === 0) {
+        const duration = Date.now() - startTime;
+        setScanDurationMs(duration);
+        setScanStage('completed');
+        const emptyReport: CleanupReport = {
+          timestamp: new Date().toISOString(),
+          folderName: targetFolderName,
+          totalFilesReviewed: 0,
+          totalExactDuplicates: 0,
+          totalVersionDrafts: 0,
+          totalTrashed: 0,
+          totalUniqueKept: 0,
+          scanDurationMs: duration,
+          cleanupInsight: 'No files matched your scan configuration in this folder.',
+          isLoadingInsight: false,
+          trashedFiles: [],
+          uncertainFiles: [],
+          keptFiles: [],
+        };
+        setReport(emptyReport);
+        return;
+      }
+
+      // Step 3: Read file content
+      setScanStage('reading_contents');
+      setTotalCount(rawFiles.length);
+      setProcessedCount(0);
+
+      const filesWithContent: DriveFileItem[] = [];
+      for (let i = 0; i < rawFiles.length; i++) {
+        if (isCancelledRef.current) {
+          setCurrentActionText('Scan stopped by user.');
+          setScanStage('idle');
+          return;
+        }
+
+        const file = rawFiles[i];
+        setCurrentActionText(`Reading content of "${file.name}" (${i + 1} of ${rawFiles.length})...`);
+        
+        try {
+          const { text, hash } = await readFileContent(file, accessToken);
+          filesWithContent.push({
+            ...file,
+            content: text,
+            contentHash: hash,
+          });
+        } catch (err) {
+          console.warn(`Could not read file ${file.name}:`, err);
+          filesWithContent.push(file);
+        }
+
+        setProcessedCount(i + 1);
+      }
+
+      if (isCancelledRef.current) {
+        setCurrentActionText('Scan stopped by user.');
+        setScanStage('idle');
+        return;
+      }
+
+      setScannedFiles(filesWithContent);
+
+      // Step 4: Analyze duplicates, draft versions & content divergence
+      setScanStage('analyzing_duplicates');
+      setCurrentActionText(
+        scanType === 'exact_only'
+          ? 'Comparing exact checksums and byte-level duplicates...'
+          : 'Comparing content hashes, text overlap, and draft chronology...'
+      );
+
+      const analysis = analyzeDuplicates(filesWithContent, {
+        exactOnly: scanType === 'exact_only',
+      });
+
+      if (isCancelledRef.current) {
+        setCurrentActionText('Scan stopped by user.');
+        setScanStage('idle');
+        return;
+      }
+
+      setActionableMatches(analysis.actionableMatches);
+      setUncertainMatches(analysis.uncertainMatches);
+      setUniqueFiles(analysis.uniqueFiles);
+
+      const duration = Date.now() - startTime;
+      setScanDurationMs(duration);
+
+      const computed = computeScanMetrics(
+        filesWithContent.length,
+        analysis.actionableMatches,
+        analysis.uncertainMatches,
+        analysis.uniqueFiles.length,
+        duration
+      );
+      setScanMetrics(computed);
+
+      // SMART SCAN (WITH REVIEW) WORKFLOW:
+      // Pre-select SAFE files (exact duplicates and linear drafts without divergence)
+      // Divergent files (with unique edits) are left unselected by default for safety!
+      const safeIds = analysis.actionableMatches
+        .filter((m) => !m.hasSignificantDivergence)
+        .map((m) => m.id);
+      setSelectedMatchIds(safeIds);
+      setScanStage('smart_review');
+      setCurrentActionText(
+        `Smart Scan Complete: Categorized ${analysis.actionableMatches.length} proposed items into safety tiers.`
+      );
+    } catch (err: any) {
+      console.error('Scan failed:', err);
+      setErrorMessage(err.message || 'An error occurred during scan.');
+      setScanStage('error');
+    }
+  };
+
+  const handleExportProposedCsv = () => {
+    const proposedReport: CleanupReport = {
+      timestamp: new Date().toISOString(),
+      folderName,
+      totalFilesReviewed: scannedFiles.length,
+      totalExactDuplicates: actionableMatches.filter((m) => m.type === 'exact').length,
+      totalVersionDrafts: actionableMatches.filter((m) => m.type !== 'exact').length,
+      totalTrashed: actionableMatches.length,
+      totalUniqueKept: uniqueFiles.length,
+      scanDurationMs,
+      metrics: scanMetrics || undefined,
+      trashedFiles: actionableMatches.map((m) => ({
+        trashedFile: m.targetFile,
+        keptOriginalFile: m.originalFile,
+        type: m.type,
+        reason: m.reason,
+        similarity: m.similarityScore,
+        trashedSuccess: false,
+      })),
+      uncertainFiles: uncertainMatches.map((m) => ({
+        fileA: m.originalFile,
+        fileB: m.targetFile,
+        reason: m.reason,
+        similarity: m.similarityScore,
+      })),
+      keptFiles: uniqueFiles,
+    };
+    exportReportToCsv(proposedReport);
+  };
+
+  /**
+   * Executes the moving of duplicate/older drafts to Google Drive Trash.
+   */
+  const handleConfirmTrash = async () => {
+    const accessToken = token || getAccessToken();
+    if (!accessToken) return;
+
+    const matchesToTrash =
+      selectedMatchIds.length > 0
+        ? actionableMatches.filter((m) => selectedMatchIds.includes(m.id))
+        : actionableMatches;
+
+    if (matchesToTrash.length === 0) return;
+
+    setIsTrashing(true);
+    setScanStage('trashing');
+    setProcessedCount(0);
+    setTotalCount(matchesToTrash.length);
+
+    const trashedResults: CleanupReport['trashedFiles'] = [];
+    let exactCount = 0;
+    let draftCount = 0;
+
+    for (let i = 0; i < matchesToTrash.length; i++) {
+      if (isCancelledRef.current) {
+        setCurrentActionText('Trashing stopped by user.');
+        break;
+      }
+
+      const match = matchesToTrash[i];
+      setCurrentActionText(
+        `Moving older copy "${match.targetFile.name}" to Drive Trash (${i + 1}/${matchesToTrash.length})...`
+      );
+
+      try {
+        await moveFileToTrash(match.targetFile.id, accessToken);
+        trashedResults.push({
+          trashedFile: match.targetFile,
+          keptOriginalFile: match.originalFile,
+          type: match.type,
+          reason: match.reason,
+          signalUsed: match.signalUsed,
+          similarity: match.similarityScore,
+          trashedSuccess: true,
+        });
+
+        if (match.type === 'exact') exactCount++;
+        else draftCount++;
+      } catch (err: any) {
+        console.error(`Failed to trash file ${match.targetFile.name}:`, err);
+        trashedResults.push({
+          trashedFile: match.targetFile,
+          keptOriginalFile: match.originalFile,
+          type: match.type,
+          reason: match.reason,
+          signalUsed: match.signalUsed,
+          similarity: match.similarityScore,
+          trashedSuccess: false,
+          error: err.message,
+        });
+      }
+
+      setProcessedCount(i + 1);
+    }
+
+    // Generate Final Cleanup Report
+    const successfulTrashed = trashedResults.filter((r) => r.trashedSuccess);
+    const newTrashedIds = successfulTrashed.map((r) => r.trashedFile.id);
+    setSessionTrashedFileIds((prev) => Array.from(new Set([...prev, ...newTrashedIds])));
+
+    const generatedReport: CleanupReport = {
+      timestamp: new Date().toISOString(),
+      folderName,
+      totalFilesReviewed: scannedFiles.length,
+      totalExactDuplicates: exactCount,
+      totalVersionDrafts: draftCount,
+      totalTrashed: successfulTrashed.length,
+      totalUniqueKept: uniqueFiles.length,
+      scanDurationMs,
+      metrics: scanMetrics || undefined,
+      trashedFiles: trashedResults,
+      uncertainFiles: uncertainMatches.map((m) => ({
+        fileA: m.originalFile,
+        fileB: m.targetFile,
+        reason: m.reason,
+        similarity: m.similarityScore,
+      })),
+      keptFiles: uniqueFiles,
+    };
+
+    setReport(generatedReport);
+    setIsTrashing(false);
+    setIsConfirmationOpen(false);
+    setScanStage('completed');
+    fetchGeminiInsight(generatedReport, matchesToTrash);
+
+    // Register Bulk Action in History with 9-second Undo Window
+    if (successfulTrashed.length > 0) {
+      const newAction: HistoryAction = {
+        id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        type: 'bulk_trash',
+        timestamp: Date.now(),
+        title: `Cleaned up ${successfulTrashed.length} duplicates`,
+        description: `Moved ${successfulTrashed.length} draft/duplicate files in "${folderName}" to Drive Trash`,
+        items: successfulTrashed.map((r) => ({
+          fileId: r.trashedFile.id,
+          fileName: r.trashedFile.name,
+        })),
+        undoAvailableUntil: Date.now() + 9000,
+        canUndo: true,
+      };
+
+      setRecentActions((prev) => [newAction, ...prev]);
+      setActiveUndoAction(newAction);
+    }
+  };
+
+  const updateFileNameInState = (fileId: string, newName: string) => {
+    setActionableMatches((prev) =>
+      prev.map((m) => {
+        let updatedTarget = m.targetFile;
+        let updatedOriginal = m.originalFile;
+        if (m.targetFile.id === fileId) {
+          updatedTarget = { ...m.targetFile, name: newName };
+        }
+        if (m.originalFile.id === fileId) {
+          updatedOriginal = { ...m.originalFile, name: newName };
+        }
+        return { ...m, targetFile: updatedTarget, originalFile: updatedOriginal };
+      })
+    );
+
+    setScannedFiles((prev) =>
+      prev.map((f) => (f.id === fileId ? { ...f, name: newName } : f))
+    );
+
+    setUniqueFiles((prev) =>
+      prev.map((f) => (f.id === fileId ? { ...f, name: newName } : f))
+    );
+
+    if (report) {
+      setReport({
+        ...report,
+        trashedFiles: report.trashedFiles.map((t) => ({
+          ...t,
+          trashedFile: t.trashedFile.id === fileId ? { ...t.trashedFile, name: newName } : t.trashedFile,
+          keptOriginalFile:
+            t.keptOriginalFile.id === fileId ? { ...t.keptOriginalFile, name: newName } : t.keptOriginalFile,
+        })),
+      });
+    }
+  };
+
+  const handleApplyRename = async (fileId: string, newName: string, oldName: string) => {
+    const accessToken = token || getAccessToken();
+    if (!accessToken) return;
+
+    await renameFile(fileId, newName, accessToken);
+    updateFileNameInState(fileId, newName);
+
+    const newAction: HistoryAction = {
+      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type: 'rename',
+      timestamp: Date.now(),
+      title: 'Renamed File',
+      description: `Renamed "${oldName}" to "${newName}"`,
+      items: [{ fileId, fileName: newName, previousName: oldName, newName }],
+      undoAvailableUntil: Date.now() + 9000,
+      canUndo: true,
+    };
+
+    setRecentActions((prev) => [newAction, ...prev]);
+    setActiveUndoAction(newAction);
+  };
+
+  const handleConfirmSmartFolder = (fileId: string, folderNameVal: string) => {
+    const target = scannedFiles.find((f) => f.id === fileId);
+    const fileName = target ? target.name : fileId;
+
+    const newAction: HistoryAction = {
+      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type: 'organize_folder',
+      timestamp: Date.now(),
+      title: `Categorized Folder`,
+      description: `Assigned "${fileName}" to "${folderNameVal}"`,
+      items: [{ fileId, fileName, folderName: folderNameVal }],
+      undoAvailableUntil: Date.now() + 9000,
+      canUndo: false,
+    };
+
+    setRecentActions((prev) => [newAction, ...prev]);
+  };
+
+  const handleTrashSingleMatch = async (match: DuplicateMatch) => {
+    const accessToken = token || getAccessToken();
+    if (!accessToken) return;
+
+    await moveFileToTrash(match.targetFile.id, accessToken);
+    setActionableMatches((prev) => prev.filter((m) => m.id !== match.id));
+    setSessionTrashedFileIds((prev) => [...prev, match.targetFile.id]);
+
+    const newAction: HistoryAction = {
+      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type: 'trash',
+      timestamp: Date.now(),
+      title: 'Moved to Drive Trash',
+      description: `Target duplicate "${match.targetFile.name}" moved to Trash`,
+      items: [{ fileId: match.targetFile.id, fileName: match.targetFile.name }],
+      undoAvailableUntil: Date.now() + 9000,
+      canUndo: true,
+    };
+
+    setRecentActions((prev) => [newAction, ...prev]);
+    setActiveUndoAction(newAction);
+  };
+
+  const handleBulkTrashMatches = async (matchesToTrash: DuplicateMatch[]) => {
+    const accessToken = token || getAccessToken();
+    if (!accessToken || matchesToTrash.length === 0) return;
+
+    const trashedResults: DriveFileItem[] = [];
+    for (const m of matchesToTrash) {
+      try {
+        await moveFileToTrash(m.targetFile.id, accessToken);
+        trashedResults.push(m.targetFile);
+      } catch (err) {
+        console.error(`Failed to trash ${m.targetFile.name}:`, err);
+      }
+    }
+
+    const trashedIds = new Set(trashedResults.map((t) => t.id));
+    setActionableMatches((prev) => prev.filter((m) => !trashedIds.has(m.targetFile.id)));
+    setSelectedMatchIds([]);
+    setSessionTrashedFileIds((prev) => [...prev, ...trashedResults.map((t) => t.id)]);
+
+    const newAction: HistoryAction = {
+      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type: 'bulk_trash',
+      timestamp: Date.now(),
+      title: `Bulk Trashed ${trashedResults.length} Files`,
+      description: `Moved ${trashedResults.length} selected duplicates to Google Drive Trash`,
+      items: trashedResults.map((t) => ({ fileId: t.id, fileName: t.name })),
+      undoAvailableUntil: Date.now() + 9000,
+      canUndo: true,
+    };
+
+    setRecentActions((prev) => [newAction, ...prev]);
+    setActiveUndoAction(newAction);
+  };
+
+  const handleBulkSmartRename = (matchesList: DuplicateMatch[]) => {
+    if (matchesList.length > 0) {
+      setSmartRenameTargetFile(matchesList[0].targetFile);
+    }
+  };
+
+  const handleBulkSmartFolder = (matchesList: DuplicateMatch[]) => {
+    if (matchesList.length > 0) {
+      setSmartFolderTargetFile(matchesList[0].targetFile);
+    }
+  };
+
+  const handleKeepAll = () => {
+    const allIds = actionableMatches.map((m) => m.id);
+    setKeptMatchIds(allIds);
+    setSelectedMatchIds([]);
+
+    const newAction: HistoryAction = {
+      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type: 'keep_all',
+      timestamp: Date.now(),
+      title: 'Kept All Duplicates',
+      description: `Marked all ${allIds.length} duplicates as kept / ignored (0 files trashed).`,
+      items: actionableMatches.map((m) => ({
+        fileId: m.targetFile.id,
+        fileName: m.targetFile.name,
+      })),
+      undoAvailableUntil: Date.now() + 9000,
+      canUndo: true,
+    };
+
+    setRecentActions((prev) => [newAction, ...prev]);
+    setActiveUndoAction(newAction);
+    setCurrentActionText(
+      `All ${allIds.length} duplicates marked as kept. Zero files staged for trashing.`
+    );
+  };
+
+  const handleResetKept = () => {
+    setKeptMatchIds([]);
+    // Restore safe default selection
+    const safeIds = actionableMatches
+      .filter((m) => !m.hasSignificantDivergence)
+      .map((m) => m.id);
+    setSelectedMatchIds(safeIds);
+  };
+
+  const handleToggleKeepMatch = (id: string) => {
+    setKeptMatchIds((prev) => {
+      const isCurrentlyKept = prev.includes(id);
+      if (isCurrentlyKept) {
+        return prev.filter((x) => x !== id);
+      } else {
+        setSelectedMatchIds((sel) => sel.filter((x) => x !== id));
+        return [...prev, id];
+      }
+    });
+  };
+
+  const handleFinalizeKeepAll = () => {
+    const generatedReport: CleanupReport = {
+      timestamp: new Date().toISOString(),
+      folderName,
+      totalFilesReviewed: scannedFiles.length,
+      totalExactDuplicates: actionableMatches.filter((m) => m.type === 'exact').length,
+      totalVersionDrafts: actionableMatches.filter((m) => m.type !== 'exact').length,
+      totalTrashed: 0,
+      totalUniqueKept: uniqueFiles.length + actionableMatches.length,
+      scanDurationMs,
+      metrics: scanMetrics || undefined,
+      trashedFiles: [],
+      uncertainFiles: uncertainMatches.map((m) => ({
+        fileA: m.originalFile,
+        fileB: m.targetFile,
+        reason: m.reason,
+        similarity: m.similarityScore,
+      })),
+      keptFiles: [...uniqueFiles, ...actionableMatches.map((m) => m.targetFile)],
+    };
+
+    setReport(generatedReport);
+    setScanStage('completed');
+    fetchGeminiInsight(generatedReport, actionableMatches);
+    setCurrentActionText(
+      `Cleanup report finalized: Kept all ${actionableMatches.length} duplicates. 0 files trashed.`
+    );
+  };
+
+  const handleExecuteUndo = async (action: HistoryAction) => {
+    const accessToken = token || getAccessToken();
+    if (!accessToken) return;
+
+    try {
+      if (action.type === 'trash' || action.type === 'bulk_trash') {
+        for (const item of action.items) {
+          await restoreFileFromTrash(item.fileId, accessToken);
+        }
+        setSessionTrashedFileIds((prev) =>
+          prev.filter((id) => !action.items.some((i) => i.fileId === id))
+        );
+      } else if (action.type === 'restore') {
+        for (const item of action.items) {
+          await moveFileToTrash(item.fileId, accessToken);
+        }
+        setSessionTrashedFileIds((prev) => [...prev, ...action.items.map((i) => i.fileId)]);
+      } else if (action.type === 'rename') {
+        for (const item of action.items) {
+          if (item.previousName) {
+            await renameFile(item.fileId, item.previousName, accessToken);
+            updateFileNameInState(item.fileId, item.previousName);
+          }
+        }
+      } else if (action.type === 'keep_all') {
+        setKeptMatchIds([]);
+        const safeIds = actionableMatches
+          .filter((m) => !m.hasSignificantDivergence)
+          .map((m) => m.id);
+        setSelectedMatchIds(safeIds);
+      }
+
+      setRecentActions((prev) =>
+        prev.map((a) => (a.id === action.id ? { ...a, isUndone: true } : a))
+      );
+      setActiveUndoAction(null);
+    } catch (err: any) {
+      console.error('Undo execution failed:', err);
+      setErrorMessage(`Undo failed: ${err.message}`);
+    }
+  };
+
+  const handleRestoreFile = async (fileId: string) => {
+    const accessToken = token || getAccessToken();
+    if (!accessToken) return;
+
+    const restoredName =
+      report?.trashedFiles.find((t) => t.trashedFile.id === fileId)?.trashedFile.name || fileId;
+
+    await restoreFileFromTrash(fileId, accessToken);
+    setSessionTrashedFileIds((prev) => prev.filter((id) => id !== fileId));
+    if (report) {
+      setReport({
+        ...report,
+        trashedFiles: report.trashedFiles.filter((t) => t.trashedFile.id !== fileId),
+        totalTrashed: Math.max(0, report.totalTrashed - 1),
+      });
+    }
+
+    const newAction: HistoryAction = {
+      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type: 'restore',
+      timestamp: Date.now(),
+      title: 'Restored File',
+      description: `Restored "${restoredName}" back to active Drive folder`,
+      items: [{ fileId, fileName: restoredName }],
+      undoAvailableUntil: Date.now() + 9000,
+      canUndo: true,
+    };
+
+    setRecentActions((prev) => [newAction, ...prev]);
+    setActiveUndoAction(newAction);
+  };
+
+  return (
+    <div className="min-h-screen bg-[#111111] text-[#F5E9DC] flex flex-col antialiased selection:bg-[#C75B12]/30 selection:text-[#F5E9DC]">
+      <Navbar
+        user={user}
+        onLogout={handleSignOut}
+        activeView={activeView}
+        onViewChange={setActiveView}
+        sessionTrashedCount={sessionTrashedFileIds.length}
+        activityCount={recentActions.length}
+        onOpenActivityTracker={() => setIsActivityTrackerOpen(true)}
+        isTokenExpired={isTokenExpired}
+        onRefreshToken={handleRefreshToken}
+      />
+
+      <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-6">
+        {!user ? (
+          <AuthScreen
+            onSignIn={handleSignIn}
+            isLoading={isLoggingIn}
+            error={authError}
+          />
+        ) : activeView === 'trash_monitor' ? (
+          <TrashBinMonitor
+            token={token}
+            sessionTrashedFileIds={sessionTrashedFileIds}
+            onItemRestored={handleRestoreFile}
+          />
+        ) : (
+          <div className="space-y-6">
+            {/* If Google Workspace token needs 1-tap refresh while user remains logged in */}
+            {isTokenExpired && (
+              <div className="bg-[#1c1812] border border-amber-500/40 rounded-3xl p-4 sm:p-5 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
+                    <RefreshCw className="w-5 h-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-[#F5E9DC]">
+                        Google Workspace Session Needs Quick Refresh
+                      </span>
+                      <span className="text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full">
+                        Account Stayed Connected
+                      </span>
+                    </div>
+                    <p className="text-xs text-[#C9A86A]">
+                      Your account ({user.displayName || user.email}) is securely remembered across sessions. Tap below to refresh your Google Drive permission without losing your setup.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  id="refresh-drive-session-btn"
+                  onClick={handleRefreshToken}
+                  disabled={isLoggingIn}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-[#C75B12] hover:bg-[#b04f0e] text-[#F5E9DC] text-xs font-bold transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer shrink-0 min-h-[44px]"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoggingIn ? 'animate-spin' : ''}`} />
+                  <span>{isLoggingIn ? 'Refreshing...' : 'Refresh Drive Session'}</span>
+                </button>
+              </div>
+            )}
+
+            {/* Scan Configuration Screen (Idle) or Active Scan Header */}
+            {scanStage === 'idle' ? (
+              <ScanConfigurationCard
+                token={token}
+                targetFolder={targetFolder}
+                scanType={scanType}
+                fileTypeFilter={fileTypeFilter}
+                customExtensions={customExtensions}
+                onTargetFolderChange={setTargetFolder}
+                onScanTypeChange={setScanType}
+                onFileTypeFilterChange={setFileTypeFilter}
+                onCustomExtensionsChange={setCustomExtensions}
+                onStartScan={startCleanupScan}
+                isLoading={false}
+              />
+            ) : (
+              <div className="bg-[#181818] border border-[#2c2c2c] rounded-3xl p-5 sm:p-6 shadow-xl space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+                      <span className="text-xs font-semibold uppercase tracking-wider text-[#C9A86A]">
+                        Scan Target &bull; {targetFolder.name}
+                      </span>
+                    </div>
+                    <h2 className="text-lg sm:text-xl font-bold text-[#F5E9DC]">
+                      {targetFolder.name}
+                    </h2>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-[#A0988E]">
+                      <span className="px-2 py-0.5 rounded-md bg-[#242424] border border-[#333333] text-[#F5E9DC]">
+                        {scanType === 'exact_only' ? 'Exact Duplicates Only' : 'Duplicates + Draft/Version Detection'}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md bg-[#242424] border border-[#333333] text-[#A0988E]">
+                        Filter: {fileTypeFilter === 'all' ? 'All Files' : fileTypeFilter}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap sm:flex-col gap-1.5 shrink-0 text-[11px] font-medium">
+                    <span className="px-2.5 py-1 rounded-lg bg-[#222222] border border-[#333333] text-[#A0988E] flex items-center gap-1.5">
+                      <FolderLock className="w-3.5 h-3.5 text-[#C75B12]" />
+                      <span>&ldquo;Craft&rdquo; Skipped</span>
+                    </span>
+                    <span className="px-2.5 py-1 rounded-lg bg-[#222222] border border-[#333333] text-[#A0988E] flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>00_README Protected</span>
+                    </span>
+                    {scanStage !== 'completed' && (
+                      <button
+                        onClick={handleStopWorkflow}
+                        className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 flex items-center gap-1.5 transition-colors cursor-pointer text-xs font-semibold"
+                        title="Stop current running analysis or workflow"
+                      >
+                        <Square className="w-3 h-3 fill-current" />
+                        <span>Stop Workflow</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Error Message */}
+            {errorMessage && (
+              <div className="p-4 rounded-2xl bg-rose-950/30 border border-rose-500/40 text-rose-300 text-xs flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5 text-rose-400" />
+                <div className="space-y-1">
+                  <strong className="font-semibold text-rose-200">Operation Error</strong>
+                  <p>{errorMessage}</p>
+                  <button
+                    onClick={() => startCleanupScan()}
+                    className="mt-2 px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/30 text-rose-200 text-xs font-medium flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Try Again</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* In-Progress Scan Visualizer */}
+            {['locating_folder', 'fetching_files', 'reading_contents', 'analyzing_duplicates', 'trashing'].includes(
+              scanStage
+            ) && (
+              <ScanProgress
+                stage={scanStage}
+                currentActionText={currentActionText}
+                processedCount={processedCount}
+                totalCount={totalCount}
+                folderName={folderName}
+                onStopScan={handleStopWorkflow}
+              />
+            )}
+
+            {/* Smart Review Stage (Interactive Safety Tiers & Divergence Verification) */}
+            {scanStage === 'smart_review' && (
+              <SmartScanReviewView
+                folderName={folderName}
+                actionableMatches={actionableMatches}
+                uncertainMatches={uncertainMatches}
+                uniqueFiles={uniqueFiles}
+                metrics={scanMetrics}
+                selectedMatchIds={selectedMatchIds}
+                keptMatchIds={keptMatchIds}
+                onCancelWorkflow={handleStopWorkflow}
+                onToggleSelectMatch={(id) => {
+                  setSelectedMatchIds((prev) =>
+                    prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+                  );
+                }}
+                onSelectSafeOnly={() => {
+                  const safeIds = actionableMatches
+                    .filter((m) => !m.hasSignificantDivergence)
+                    .map((m) => m.id);
+                  setSelectedMatchIds(safeIds);
+                }}
+                onSelectAll={() => setSelectedMatchIds(actionableMatches.map((m) => m.id))}
+                onDeselectAll={() => setSelectedMatchIds([])}
+                onKeepAll={handleKeepAll}
+                onResetKept={handleResetKept}
+                onToggleKeepMatch={handleToggleKeepMatch}
+                onFinalizeKeepAll={handleFinalizeKeepAll}
+                onOpenComparison={(match) => setSelectedComparison(match)}
+                onProceedToDetailedResults={() => setScanStage('ready_for_review')}
+                onConfirmTrashApproved={() => setIsConfirmationOpen(true)}
+              />
+            )}
+
+            {/* Ready for Review Stage (Granular Results & Full Filter Bar) */}
+            {scanStage === 'ready_for_review' && (
+              <div className="bg-[#181818] border border-[#2c2c2c] rounded-3xl p-5 sm:p-6 space-y-5 animate-in fade-in duration-200">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#262626]">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#C75B12]" />
+                      <h3 className="text-base font-bold text-[#F5E9DC]">
+                        Proposed Cleanup Plan ({actionableMatches.length} candidates)
+                      </h3>
+                    </div>
+                    <p className="text-xs text-[#A0988E] mt-0.5">
+                      Reviewed {scannedFiles.length} files. Filter results, inspect diffs, and select files to trash.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => setScanStage('smart_review')}
+                      className="px-3.5 py-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[#C9A86A] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer min-h-[44px]"
+                      title="Switch to tiered safety review stage"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      <span>Smart Review Tiers</span>
+                    </button>
+                    <button
+                      id="export-proposed-csv-btn"
+                      onClick={handleExportProposedCsv}
+                      className="px-3.5 py-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[#F5E9DC] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer min-h-[44px]"
+                      title="Download proposed cleanup plan as CSV"
+                    >
+                      <Download className="w-4 h-4 text-[#C75B12]" />
+                      <span>Export CSV</span>
+                    </button>
+                    <button
+                      onClick={() => startCleanupScan()}
+                      className="px-3.5 py-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[#A0988E] hover:text-[#F5E9DC] text-xs font-medium transition-colors cursor-pointer min-h-[44px]"
+                    >
+                      Re-scan
+                    </button>
+                    <button
+                      onClick={handleStopWorkflow}
+                      className="px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer min-h-[44px]"
+                      title="Cancel review and return to scan configuration"
+                    >
+                      <Square className="w-3.5 h-3.5 fill-current" />
+                      <span>Stop Workflow</span>
+                    </button>
+                    <button
+                      id="confirm-trash-btn"
+                      onClick={() => setIsConfirmationOpen(true)}
+                      disabled={selectedMatchIds.length === 0 && actionableMatches.length === 0}
+                      className="px-5 py-2.5 rounded-xl bg-[#C75B12] hover:bg-[#d66518] disabled:opacity-50 text-[#F5E9DC] text-xs font-bold shadow-md flex items-center gap-2 transition-all cursor-pointer min-h-[44px]"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span>
+                        Execute Trash ({selectedMatchIds.length > 0 ? selectedMatchIds.length : actionableMatches.length})
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Scan Summary Metrics Pre-Execution */}
+                {scanMetrics && (
+                  <ScanMetricsCard
+                    metrics={scanMetrics}
+                    folderName={folderName}
+                    isPreTrash={true}
+                  />
+                )}
+
+                {/* Match Lists & Enhanced Controls (Grid/List, Smart Folder, Smart Rename, Hover Summary, Bulk Actions) */}
+                <MatchesView
+                  matches={actionableMatches}
+                  uncertainMatches={uncertainMatches}
+                  selectedMatchIds={selectedMatchIds}
+                  onToggleSelectMatch={(id) => {
+                    setSelectedMatchIds((prev) =>
+                      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+                    );
+                  }}
+                  onSelectAll={() => setSelectedMatchIds(actionableMatches.map((m) => m.id))}
+                  onDeselectAll={() => setSelectedMatchIds([])}
+                  onOpenComparison={(match) => setSelectedComparison(match)}
+                  onOpenSmartRename={(file) => setSmartRenameTargetFile(file)}
+                  onOpenSmartFolder={(file) => setSmartFolderTargetFile(file)}
+                  onTrashSingleMatch={handleTrashSingleMatch}
+                  onBulkTrashMatches={handleBulkTrashMatches}
+                  onBulkSmartRename={handleBulkSmartRename}
+                  onBulkSmartFolder={handleBulkSmartFolder}
+                />
+              </div>
+            )}
+
+            {/* Completed Final Report */}
+            {scanStage === 'completed' && report && (
+              <ReportView
+                report={report}
+                onRestoreFile={handleRestoreFile}
+                onOpenComparison={(match) => setSelectedComparison(match)}
+                onRefreshInsight={() => fetchGeminiInsight(report)}
+                onRestartScan={() => {
+                  setScanStage('idle');
+                  setReport(null);
+                }}
+              />
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* 7-10 Second Undo Floating Bar */}
+      <UndoActionBar
+        activeAction={activeUndoAction}
+        onUndo={handleExecuteUndo}
+        onDismiss={() => setActiveUndoAction(null)}
+      />
+
+      {/* Activity Tracker Slide-Out Drawer */}
+      <ActivityTrackerDrawer
+        isOpen={isActivityTrackerOpen}
+        onClose={() => setIsActivityTrackerOpen(false)}
+        actions={recentActions}
+        onUndoAction={handleExecuteUndo}
+        onClearHistory={() => setRecentActions([])}
+      />
+
+      {/* Smart Rename Modal */}
+      <SmartRenameModal
+        isOpen={smartRenameTargetFile !== null}
+        file={smartRenameTargetFile}
+        onClose={() => setSmartRenameTargetFile(null)}
+        onApplyRename={handleApplyRename}
+      />
+
+      {/* Smart Folder Suggestion Modal */}
+      <SmartFolderModal
+        isOpen={smartFolderTargetFile !== null}
+        file={smartFolderTargetFile}
+        onClose={() => setSmartFolderTargetFile(null)}
+        onConfirmFolder={handleConfirmSmartFolder}
+      />
+
+      {/* Confirmation Modal (Mandatory for destructive trash operations) */}
+      <ConfirmationModal
+        isOpen={isConfirmationOpen}
+        matchesToTrash={
+          selectedMatchIds.length > 0
+            ? actionableMatches.filter((m) => selectedMatchIds.includes(m.id))
+            : actionableMatches
+        }
+        onConfirm={handleConfirmTrash}
+        onCancel={() => setIsConfirmationOpen(false)}
+        isTrashing={isTrashing}
+      />
+
+      {/* Side-by-side comparison modal */}
+      <FileComparisonModal
+        match={selectedComparison}
+        onClose={() => setSelectedComparison(null)}
+      />
+    </div>
+  );
+}

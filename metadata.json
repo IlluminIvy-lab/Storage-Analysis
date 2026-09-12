@@ -1,0 +1,7 @@
+{
+  "name": "Drive Cleanup Agent",
+  "description": "Scans Google Drive for duplicate documents and older draft versions, keeping the most recent copy and safely moving duplicates to trash.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
