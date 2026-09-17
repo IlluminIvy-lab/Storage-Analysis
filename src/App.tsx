@@ -66,6 +66,9 @@ import { SmartRenameModal } from './components/SmartRenameModal';
 import { SmartFolderModal } from './components/SmartFolderModal';
 import { SmartScanReviewView } from './components/SmartScanReviewView';
 import { ScanConfigurationCard } from './components/ScanConfigurationCard';
+import { LeftDrawerMenu } from './components/LeftDrawerMenu';
+import { QuickViewModal } from './components/QuickViewModal';
+import { ScanSummaryModal } from './components/ScanSummaryModal';
 
 export default function App() {
   // Restore user & Drive token from persistent session on mount
@@ -81,10 +84,19 @@ export default function App() {
   const [activeView, setActiveView] = useState<'cleanup' | 'trash_monitor'>('cleanup');
   const [sessionTrashedFileIds, setSessionTrashedFileIds] = useState<string[]>([]);
 
+  // Navigation Left Drawer Menu & Appearance state
+  const [isLeftDrawerOpen, setIsLeftDrawerOpen] = useState<boolean>(false);
+  const [isLightMode, setIsLightMode] = useState<boolean>(false);
+  const [fontSize, setFontSize] = useState<'compact' | 'standard' | 'spacious'>('standard');
+
+  // Quick View Modal state
+  const [quickViewFile, setQuickViewFile] = useState<DriveFileItem | null>(null);
+  const [quickViewMatch, setQuickViewMatch] = useState<DuplicateMatch | null>(null);
+
   // Scan configuration & state
   const [targetFolder, setTargetFolder] = useState<DriveFolderItem>({
     id: 'root',
-    name: 'My Drive (Root)',
+    name: 'Entire Google Drive',
   });
   const [scanType, setScanType] = useState<ScanType>('duplicates_and_drafts');
   const [fileTypeFilter, setFileTypeFilter] = useState<FileTypeFilter>('all');
@@ -110,6 +122,7 @@ export default function App() {
   const [isConfirmationOpen, setIsConfirmationOpen] = useState<boolean>(false);
   const [selectedComparison, setSelectedComparison] = useState<DuplicateMatch | null>(null);
   const [isTrashing, setIsTrashing] = useState<boolean>(false);
+  const [isScanSummaryOpen, setIsScanSummaryOpen] = useState<boolean>(false);
 
   // Bulk selection & smart intelligence state
   const [selectedMatchIds, setSelectedMatchIds] = useState<string[]>([]);
@@ -235,40 +248,80 @@ export default function App() {
               reason: t.reason,
             }));
 
-      const response = await fetch('/api/gemini/cleanup-insight', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          folderName: currentReport.folderName,
-          matches: matchesPayload,
-          totalScanned: currentReport.totalFilesReviewed,
-          totalUniqueKept: currentReport.totalUniqueKept,
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        if (data.insight) {
-          setReport((prev) =>
-            prev ? { ...prev, cleanupInsight: data.insight, isLoadingInsight: false } : null
-          );
-          return;
+      // Helper to compute tailored fallback insight based on reviewed files
+      const computeClientInsight = () => {
+        if (!matchesPayload || matchesPayload.length === 0) {
+          return 'No duplicate files or draft redundancies were detected across your reviewed files.';
         }
-      }
-    } catch (err) {
-      console.error('Failed to fetch Gemini cleanup insight:', err);
-    }
+        let exactCount = 0;
+        let draftCount = 0;
+        const extCounts: Record<string, number> = {};
+        for (const m of matchesPayload) {
+          if (m.type === 'exact') exactCount++;
+          else draftCount++;
+          const ext = m.name?.includes('.') ? m.name.slice(m.name.lastIndexOf('.')) : 'documents';
+          extCounts[ext] = (extCounts[ext] || 0) + 1;
+        }
+        const topExt = Object.entries(extCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'documents';
+        if (exactCount >= draftCount) {
+          return `Most duplicates identified are exact identical copies across your ${topExt} records.`;
+        }
+        return `Most duplicates identified are older revision drafts and redundant copies of your ${topExt} documents.`;
+      };
 
-    setReport((prev) =>
-      prev
-        ? {
-            ...prev,
-            cleanupInsight:
-              'Most duplicates identified are older revision drafts and redundant copies of your working documents.',
-            isLoadingInsight: false,
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+      try {
+        const response = await fetch('/api/gemini/cleanup-insight', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            folderName: currentReport.folderName,
+            matches: matchesPayload,
+            totalScanned: currentReport.totalFilesReviewed,
+            totalUniqueKept: currentReport.totalUniqueKept,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.insight) {
+            setReport((prev) =>
+              prev ? { ...prev, cleanupInsight: data.insight, isLoadingInsight: false } : null
+            );
+            return;
           }
-        : null
-    );
+        }
+      } catch (networkErr) {
+        clearTimeout(timeoutId);
+        console.warn('Notice: Gemini insight API request fell back to local synthesis:', networkErr);
+      }
+
+      setReport((prev) =>
+        prev
+          ? {
+              ...prev,
+              cleanupInsight: computeClientInsight(),
+              isLoadingInsight: false,
+            }
+          : null
+      );
+    } catch (err) {
+      console.warn('Notice: Cleanup insight synthesis completed via fallback:', err);
+      setReport((prev) =>
+        prev
+          ? {
+              ...prev,
+              cleanupInsight:
+                'Most duplicates identified are older revision drafts and redundant copies of your working documents.',
+              isLoadingInsight: false,
+            }
+          : null
+      );
+    }
   };
 
   /**
@@ -296,28 +349,42 @@ export default function App() {
     try {
       // Step 1: Target folder verification
       setScanStage('locating_folder');
-      setCurrentActionText(`Targeting folder "${targetFolder.name}" in Drive (skipping "Craft")...`);
-
       const targetFolderId = targetFolder.id || 'root';
-      const targetFolderName = targetFolder.name || 'My Drive';
+      const isEntireDrive = targetFolderId === 'root';
+      const targetFolderName = isEntireDrive ? 'Entire Google Drive' : (targetFolder.name || 'Entire Google Drive');
 
-      // Strict safety: Never allow scanning a folder named "Craft"
+      setCurrentActionText(
+        isEntireDrive
+          ? 'Preparing recursive scan across entire Google Drive (skipping Craft)...'
+          : `Targeting folder "${targetFolderName}" in Google Drive...`
+      );
+
+      // CRITICAL SAFETY REQUIREMENT: Never allow targeting Craft
       if (targetFolderName.toLowerCase() === 'craft') {
         throw new Error('Access to the "Craft" folder is strictly restricted per policy.');
       }
 
       if (isCancelledRef.current) return;
 
-      // Step 2: Enumerate files (excluding Craft and 00_README.txt)
+      // Step 2: Enumerate files (recursive crawl across all subfolders at every depth)
       setScanStage('fetching_files');
-      setCurrentActionText(`Enumerating files in "${targetFolderName}" (ignoring 00_README.txt)...`);
+      setCurrentActionText(
+        isEntireDrive
+          ? 'Scanning entire Drive recursively across all subfolders (skipping Craft)...'
+          : `Enumerating files and subfolders in "${targetFolderName}" (skipping Craft)...`
+      );
 
       const enumeratedFiles = await listAllFilesInFolder(
         targetFolderId,
         accessToken,
-        (count) => {
-          setCurrentActionText(`Found ${count} file${count === 1 ? '' : 's'} in "${targetFolderName}"...`);
-        }
+        (count, currentFolder) => {
+          setCurrentActionText(
+            isEntireDrive
+              ? `Found ${count} files (scanning folder "${currentFolder}")...`
+              : `Found ${count} files in "${currentFolder}"...`
+          );
+        },
+        targetFolderName
       );
 
       if (isCancelledRef.current) return;
@@ -431,8 +498,9 @@ export default function App() {
         .map((m) => m.id);
       setSelectedMatchIds(safeIds);
       setScanStage('smart_review');
+      setIsScanSummaryOpen(true);
       setCurrentActionText(
-        `Smart Scan Complete: Categorized ${analysis.actionableMatches.length} proposed items into safety tiers.`
+        `Scan Complete: Categorized ${analysis.actionableMatches.length} proposed items into safety tiers.`
       );
     } catch (err: any) {
       console.error('Scan failed:', err);
@@ -884,7 +952,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#111111] text-[#F5E9DC] flex flex-col antialiased selection:bg-[#C75B12]/30 selection:text-[#F5E9DC]">
+    <div className={`min-h-screen ${isLightMode ? 'bg-[#f4efe8] text-[#1a1714]' : 'bg-[#111111] text-[#F5E9DC]'} flex flex-col antialiased selection:bg-[#C75B12]/30 selection:text-[#F5E9DC]`}>
       <Navbar
         user={user}
         onLogout={handleSignOut}
@@ -895,6 +963,7 @@ export default function App() {
         onOpenActivityTracker={() => setIsActivityTrackerOpen(true)}
         isTokenExpired={isTokenExpired}
         onRefreshToken={handleRefreshToken}
+        onOpenLeftDrawer={() => setIsLeftDrawerOpen(true)}
       />
 
       <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-6">
@@ -984,14 +1053,14 @@ export default function App() {
                   </div>
 
                   <div className="flex flex-wrap sm:flex-col gap-1.5 shrink-0 text-[11px] font-medium">
-                    <span className="px-2.5 py-1 rounded-lg bg-[#222222] border border-[#333333] text-[#A0988E] flex items-center gap-1.5">
-                      <FolderLock className="w-3.5 h-3.5 text-[#C75B12]" />
-                      <span>&ldquo;Craft&rdquo; Skipped</span>
-                    </span>
-                    <span className="px-2.5 py-1 rounded-lg bg-[#222222] border border-[#333333] text-[#A0988E] flex items-center gap-1.5">
+                    <button
+                      onClick={() => setIsLeftDrawerOpen(true)}
+                      className="px-2.5 py-1 rounded-lg bg-[#222222] hover:bg-[#282828] border border-[#333333] text-[#C9A86A] flex items-center gap-1.5 cursor-pointer transition-colors"
+                      title="View active safeguards and protection policies"
+                    >
                       <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>00_README Protected</span>
-                    </span>
+                      <span>Safeguards & Policies Active</span>
+                    </button>
                     {scanStage !== 'completed' && (
                       <button
                         onClick={handleStopWorkflow}
@@ -1050,6 +1119,7 @@ export default function App() {
                 selectedMatchIds={selectedMatchIds}
                 keptMatchIds={keptMatchIds}
                 onCancelWorkflow={handleStopWorkflow}
+                onOpenSummary={() => setIsScanSummaryOpen(true)}
                 onToggleSelectMatch={(id) => {
                   setSelectedMatchIds((prev) =>
                     prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
@@ -1068,6 +1138,10 @@ export default function App() {
                 onToggleKeepMatch={handleToggleKeepMatch}
                 onFinalizeKeepAll={handleFinalizeKeepAll}
                 onOpenComparison={(match) => setSelectedComparison(match)}
+                onOpenQuickView={(file, match) => {
+                  setQuickViewFile(file);
+                  setQuickViewMatch(match || null);
+                }}
                 onProceedToDetailedResults={() => setScanStage('ready_for_review')}
                 onConfirmTrashApproved={() => setIsConfirmationOpen(true)}
               />
@@ -1090,6 +1164,14 @@ export default function App() {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => setIsScanSummaryOpen(true)}
+                      className="px-3.5 py-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[#C9A86A] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer min-h-[44px]"
+                      title="View concise findings overview and quick triage options"
+                    >
+                      <Sparkles className="w-4 h-4 text-[#C9A86A]" />
+                      <span>Summary</span>
+                    </button>
                     <button
                       onClick={() => setScanStage('smart_review')}
                       className="px-3.5 py-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[#C9A86A] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer min-h-[44px]"
@@ -1157,6 +1239,10 @@ export default function App() {
                   onSelectAll={() => setSelectedMatchIds(actionableMatches.map((m) => m.id))}
                   onDeselectAll={() => setSelectedMatchIds([])}
                   onOpenComparison={(match) => setSelectedComparison(match)}
+                  onOpenQuickView={(file, match) => {
+                    setQuickViewFile(file);
+                    setQuickViewMatch(match || null);
+                  }}
                   onOpenSmartRename={(file) => setSmartRenameTargetFile(file)}
                   onOpenSmartFolder={(file) => setSmartFolderTargetFile(file)}
                   onTrashSingleMatch={handleTrashSingleMatch}
@@ -1216,6 +1302,35 @@ export default function App() {
         onConfirmFolder={handleConfirmSmartFolder}
       />
 
+      {/* Concise Scan Findings Summary & Quick Triage Modal */}
+      <ScanSummaryModal
+        isOpen={isScanSummaryOpen}
+        onClose={() => setIsScanSummaryOpen(false)}
+        folderName={targetFolder.id === 'root' ? 'Entire Google Drive' : targetFolder.name}
+        scannedFiles={scannedFiles}
+        actionableMatches={actionableMatches}
+        uncertainMatches={uncertainMatches}
+        uniqueFiles={uniqueFiles}
+        onReviewAllDetails={() => {
+          setIsScanSummaryOpen(false);
+          setScanStage('smart_review');
+        }}
+        onSelectExactOnlyAndReview={() => {
+          const exactIds = actionableMatches
+            .filter((m) => m.type === 'exact')
+            .map((m) => m.id);
+          setSelectedMatchIds(exactIds);
+          setIsScanSummaryOpen(false);
+          setScanStage('smart_review');
+        }}
+        onKeepEverythingForNow={() => {
+          handleKeepAll();
+          setIsScanSummaryOpen(false);
+          setScanStage('smart_review');
+        }}
+        onExportReport={handleExportProposedCsv}
+      />
+
       {/* Confirmation Modal (Mandatory for destructive trash operations) */}
       <ConfirmationModal
         isOpen={isConfirmationOpen}
@@ -1233,6 +1348,54 @@ export default function App() {
       <FileComparisonModal
         match={selectedComparison}
         onClose={() => setSelectedComparison(null)}
+      />
+
+      {/* Quick View Snippet & Metadata Modal */}
+      <QuickViewModal
+        isOpen={quickViewFile !== null}
+        file={quickViewFile}
+        match={quickViewMatch}
+        onClose={() => {
+          setQuickViewFile(null);
+          setQuickViewMatch(null);
+        }}
+        onOpenFullComparison={(match) => {
+          setQuickViewFile(null);
+          setQuickViewMatch(null);
+          setSelectedComparison(match);
+        }}
+      />
+
+      {/* Left Drawer Pullout Menu (Display/Appearance, Navigation, Results Management, Safeguards) */}
+      <LeftDrawerMenu
+        isOpen={isLeftDrawerOpen}
+        onClose={() => setIsLeftDrawerOpen(false)}
+        activeView={activeView}
+        onViewChange={(v) => {
+          setActiveView(v);
+          setIsLeftDrawerOpen(false);
+        }}
+        onOpenActivityTracker={() => {
+          setIsLeftDrawerOpen(false);
+          setIsActivityTrackerOpen(true);
+        }}
+        activityCount={recentActions.length}
+        sessionTrashedCount={sessionTrashedFileIds.length}
+        isLightMode={isLightMode}
+        onToggleTheme={() => setIsLightMode((prev) => !prev)}
+        fontSize={fontSize}
+        onChangeFontSize={(size) => setFontSize(size)}
+        currentFolder={targetFolder}
+        matchesCount={actionableMatches.length}
+        selectedMatchesCount={selectedMatchIds.length}
+        onSelectAllMatches={() => setSelectedMatchIds(actionableMatches.map((m) => m.id))}
+        onDeselectAllMatches={() => setSelectedMatchIds([])}
+        onExportCsv={actionableMatches.length > 0 ? handleExportProposedCsv : undefined}
+        onNewScan={() => {
+          setIsLeftDrawerOpen(false);
+          setScanStage('idle');
+          setReport(null);
+        }}
       />
     </div>
   );

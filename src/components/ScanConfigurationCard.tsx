@@ -7,7 +7,7 @@ import {
   FileText,
   Filter,
   ShieldCheck,
-  FolderLock,
+  Trash2,
   Search,
   X,
   RefreshCw,
@@ -91,7 +91,7 @@ export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
   };
 
   const handleSelectRoot = () => {
-    onTargetFolderChange({ id: 'root', name: 'My Drive (Root)' });
+    onTargetFolderChange({ id: 'root', name: 'Entire Google Drive' });
     setIsBrowserOpen(false);
   };
 
@@ -137,18 +137,18 @@ export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
         {/* Safeguard status badges */}
         <div className="flex flex-wrap sm:flex-col gap-1.5 shrink-0 text-[11px] font-medium">
           <span
-            className="px-2.5 py-1 rounded-lg bg-[#222222] border border-[#333333] text-[#A0988E] flex items-center gap-1.5"
-            title="Policy rule: 'Craft' folder is never accessed"
+            className="px-2.5 py-1 rounded-lg bg-[#222222] border border-[#333333] text-emerald-400 flex items-center gap-1.5"
+            title="Safe Drive Trash: Items moved to trash retain 30-day recovery window"
           >
-            <FolderLock className="w-3.5 h-3.5 text-[#C75B12]" />
-            <span>&ldquo;Craft&rdquo; Skipped</span>
+            <Trash2 className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Non-Destructive Trash</span>
           </span>
           <span
             className="px-2.5 py-1 rounded-lg bg-[#222222] border border-[#333333] text-[#A0988E] flex items-center gap-1.5"
-            title="Policy rule: 00_README.txt answer key is never read or moved"
+            title="Interactive Review: Every duplicate candidate requires user confirmation"
           >
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            <span>00_README Protected</span>
+            <ShieldCheck className="w-3.5 h-3.5 text-[#C9A86A]" />
+            <span>Review Safeguard</span>
           </span>
           <span
             className="px-2.5 py-1 rounded-lg bg-[#222222] border border-[#333333] text-[#C9A86A] flex items-center gap-1.5"
@@ -160,77 +160,163 @@ export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
         </div>
       </div>
 
-      {/* 1. TARGET FOLDER SELECTION */}
+      {/* 1. TARGET SELECTION (ENTIRE DRIVE vs SPECIFIC FOLDER) */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <label className="text-xs font-bold uppercase tracking-wider text-[#F5E9DC] flex items-center gap-2">
             <Folder className="w-4 h-4 text-[#C75B12]" />
-            <span>1. Target Folder</span>
+            <span>1. Scan Target</span>
           </label>
           <span className="text-[11px] text-[#A0988E]">
-            {targetFolder.id === 'root' ? 'Default: My Drive' : 'Custom folder selected'}
+            {targetFolder.id === 'root' ? 'Target: Entire Drive (Recursive)' : `Target: "${targetFolder.name}"`}
           </span>
         </div>
 
-        {/* Selected Folder Pill / Banner */}
-        <div className="bg-[#1e1e1e] border border-[#333333] rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-[#262626] border border-[#383838] flex items-center justify-center shrink-0">
-              {targetFolder.id === 'root' ? (
-                <HardDrive className="w-5 h-5 text-[#C9A86A]" />
-              ) : (
-                <FolderOpen className="w-5 h-5 text-[#C75B12]" />
-              )}
+        {/* Scan Mode Toggle Cards: Entire Drive vs Specific Folder */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Card A: Entire Google Drive */}
+          <button
+            id="target-mode-entire-drive-btn"
+            type="button"
+            onClick={handleSelectRoot}
+            className={`p-4 rounded-2xl border text-left transition-all cursor-pointer min-h-[52px] flex items-start gap-3.5 ${
+              targetFolder.id === 'root'
+                ? 'bg-[#1e1a17] border-[#C75B12] shadow-lg shadow-[#C75B12]/10 ring-1 ring-[#C75B12]'
+                : 'bg-[#1a1a1a] hover:bg-[#202020] border-[#2c2c2c] text-[#A0988E]'
+            }`}
+          >
+            <div
+              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
+                targetFolder.id === 'root'
+                  ? 'bg-[#C75B12]/20 text-[#C75B12] border border-[#C75B12]/30'
+                  : 'bg-[#252525] text-[#888888] border border-[#333333]'
+              }`}
+            >
+              <HardDrive className="w-5 h-5" />
             </div>
-            <div>
-              <div className="text-sm font-bold text-[#F5E9DC] flex items-center gap-2">
-                <span>{targetFolder.name}</span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <span
+                  className={`text-sm font-bold ${
+                    targetFolder.id === 'root' ? 'text-[#F5E9DC]' : 'text-[#D5CDBC]'
+                  }`}
+                >
+                  Entire Google Drive
+                </span>
                 {targetFolder.id === 'root' && (
-                  <span className="text-[10px] uppercase font-semibold px-2 py-0.5 rounded-full bg-[#C9A86A]/20 text-[#C9A86A] border border-[#C9A86A]/30">
-                    Root
+                  <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-[#C75B12]/20 text-[#C75B12] border border-[#C75B12]/40">
+                    Active
                   </span>
                 )}
               </div>
-              <p className="text-[11px] text-[#A0988E]">
-                {targetFolder.id === 'root'
-                  ? 'All files and subfolders in My Drive will be evaluated (skipping Craft)'
-                  : `Folder ID: ${targetFolder.id}`}
+              <p className="text-[11px] text-[#888888] mt-1 leading-snug">
+                True recursive scan through all folders &amp; subfolders from root. Strictly skips &ldquo;Craft&rdquo;.
               </p>
             </div>
+          </button>
+
+          {/* Card B: Specific Folder */}
+          <button
+            id="target-mode-specific-folder-btn"
+            type="button"
+            onClick={() => setIsBrowserOpen(true)}
+            className={`p-4 rounded-2xl border text-left transition-all cursor-pointer min-h-[52px] flex items-start gap-3.5 ${
+              targetFolder.id !== 'root'
+                ? 'bg-[#1c1d1c] border-[#C9A86A] shadow-lg shadow-[#C9A86A]/10 ring-1 ring-[#C9A86A]'
+                : 'bg-[#1a1a1a] hover:bg-[#202020] border-[#2c2c2c] text-[#A0988E]'
+            }`}
+          >
+            <div
+              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
+                targetFolder.id !== 'root'
+                  ? 'bg-[#C9A86A]/20 text-[#C9A86A] border border-[#C9A86A]/30'
+                  : 'bg-[#252525] text-[#888888] border border-[#333333]'
+              }`}
+            >
+              <FolderOpen className="w-5 h-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <span
+                  className={`text-sm font-bold truncate ${
+                    targetFolder.id !== 'root' ? 'text-[#F5E9DC]' : 'text-[#D5CDBC]'
+                  }`}
+                >
+                  {targetFolder.id !== 'root' ? targetFolder.name : 'Pick Specific Folder'}
+                </span>
+                {targetFolder.id !== 'root' ? (
+                  <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-[#C9A86A]/20 text-[#C9A86A] border border-[#C9A86A]/40 shrink-0">
+                    Folder
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-[#777777] shrink-0">Choose</span>
+                )}
+              </div>
+              <p className="text-[11px] text-[#888888] mt-1 leading-snug truncate">
+                {targetFolder.id !== 'root'
+                  ? `Scanning "${targetFolder.name}" and all subfolders`
+                  : 'Select an individual folder to limit scan scope'}
+              </p>
+            </div>
+          </button>
+        </div>
+
+        {/* Selected Folder Status Strip & Browse Toggle */}
+        <div className="bg-[#181818] border border-[#2c2c2c] rounded-2xl px-4 py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0 text-xs">
+            <span className="text-[#888888]">Current Target:</span>
+            <span className="font-semibold text-[#F5E9DC] truncate">
+              {targetFolder.id === 'root' ? 'Entire Google Drive (All Folders & Subfolders)' : targetFolder.name}
+            </span>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            {targetFolder.id !== 'root' && (
-              <button
-                type="button"
-                onClick={handleSelectRoot}
-                className="px-3 py-2 rounded-xl bg-[#252525] hover:bg-[#2e2e2e] border border-[#3a3a3a] text-xs font-medium text-[#A0988E] hover:text-[#F5E9DC] transition-colors cursor-pointer min-h-[44px]"
-                title="Switch back to My Drive root"
-              >
-                Reset to Root
-              </button>
+          <button
+            id="browse-drive-folders-btn"
+            type="button"
+            onClick={() => setIsBrowserOpen((prev) => !prev)}
+            className="px-3 py-1.5 rounded-xl bg-[#252525] hover:bg-[#2e2e2e] border border-[#3a3a3a] text-xs font-semibold text-[#F5E9DC] flex items-center gap-1.5 transition-colors cursor-pointer min-h-[38px] shrink-0"
+          >
+            <Folder className="w-3.5 h-3.5 text-[#C9A86A]" />
+            <span>{isBrowserOpen ? 'Hide Folders' : 'Browse Folders'}</span>
+            {isBrowserOpen ? (
+              <ChevronUp className="w-3 h-3 text-[#A0988E]" />
+            ) : (
+              <ChevronDown className="w-3 h-3 text-[#A0988E]" />
             )}
-            <button
-              id="browse-drive-folders-btn"
-              type="button"
-              onClick={() => setIsBrowserOpen((prev) => !prev)}
-              className="px-4 py-2 rounded-xl bg-[#2a2a2a] hover:bg-[#333333] border border-[#444444] text-xs font-semibold text-[#F5E9DC] flex items-center gap-2 transition-colors cursor-pointer min-h-[44px]"
-            >
-              <Folder className="w-4 h-4 text-[#C9A86A]" />
-              <span>{isBrowserOpen ? 'Close Browser' : 'Browse Folders'}</span>
-              {isBrowserOpen ? (
-                <ChevronUp className="w-3.5 h-3.5 text-[#A0988E]" />
-              ) : (
-                <ChevronDown className="w-3.5 h-3.5 text-[#A0988E]" />
-              )}
-            </button>
-          </div>
+          </button>
         </div>
 
         {/* FOLDER BROWSER DRAWER */}
         {isBrowserOpen && (
           <div className="bg-[#141414] border border-[#2a2a2a] rounded-2xl p-4 space-y-3 animate-in fade-in slide-in-from-top-2 duration-150">
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+            {/* Quick-Pick Entire Drive option inside browser */}
+            <button
+              type="button"
+              onClick={handleSelectRoot}
+              className={`w-full p-3 rounded-xl border text-left flex items-center justify-between gap-3 transition-colors cursor-pointer min-h-[44px] ${
+                targetFolder.id === 'root'
+                  ? 'bg-[#C75B12]/20 border-[#C75B12]/60 text-[#F5E9DC]'
+                  : 'bg-[#1b1b1b] hover:bg-[#222222] border-[#2e2e2e] text-[#D5CDBC]'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <HardDrive className={`w-4 h-4 shrink-0 ${targetFolder.id === 'root' ? 'text-[#C75B12]' : 'text-[#C9A86A]'}`} />
+                <div>
+                  <div className="text-xs font-bold">Entire Google Drive (All Folders &amp; Subfolders)</div>
+                  <div className="text-[11px] text-[#888888]">
+                    Recursively scan all folders starting from root (excludes &ldquo;Craft&rdquo;)
+                  </div>
+                </div>
+              </div>
+              {targetFolder.id === 'root' && (
+                <span className="text-[11px] font-bold text-[#C75B12] flex items-center gap-1 shrink-0">
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Selected</span>
+                </span>
+              )}
+            </button>
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-1">
               {/* Search input */}
               <div className="relative flex-1">
                 <Search className="w-4 h-4 text-[#888888] absolute left-3 top-1/2 -translate-y-1/2" />
@@ -239,7 +325,7 @@ export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
                   type="text"
                   value={folderSearchQuery}
                   onChange={(e) => setFolderSearchQuery(e.target.value)}
-                  placeholder="Search folders by name (e.g. 'TEST', 'Documents')..."
+                  placeholder="Search folders by name (e.g. 'Documents', 'Archive')..."
                   className="w-full pl-9 pr-8 py-2.5 rounded-xl bg-[#1e1e1e] border border-[#333333] text-xs text-[#F5E9DC] placeholder-[#777777] focus:outline-none focus:border-[#C75B12] min-h-[44px]"
                 />
                 {folderSearchQuery && (
@@ -253,18 +339,6 @@ export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
               </div>
 
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleSelectRoot}
-                  className={`px-3 py-2 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer min-h-[44px] ${
-                    targetFolder.id === 'root'
-                      ? 'bg-[#C75B12]/20 border-[#C75B12] text-[#F5E9DC]'
-                      : 'bg-[#222222] border-[#333333] text-[#A0988E] hover:text-[#F5E9DC]'
-                  }`}
-                >
-                  <HardDrive className="w-3.5 h-3.5" />
-                  <span>Pick My Drive (Root)</span>
-                </button>
                 <button
                   type="button"
                   onClick={fetchFolders}
@@ -300,7 +374,6 @@ export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
               ) : (
                 filteredFolders.map((folder) => {
                   const isSelected = targetFolder.id === folder.id;
-                  const isPastTest = folder.name.toLowerCase() === 'test';
                   return (
                     <button
                       key={folder.id}
@@ -315,11 +388,6 @@ export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
                       <div className="flex items-center gap-2.5 min-w-0">
                         <Folder className={`w-4 h-4 shrink-0 ${isSelected ? 'text-[#C75B12]' : 'text-[#C9A86A]'}`} />
                         <span className="text-xs font-semibold truncate">{folder.name}</span>
-                        {isPastTest && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#333333] text-[#A0988E]">
-                            Past target
-                          </span>
-                        )}
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         {isSelected ? (

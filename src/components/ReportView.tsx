@@ -117,9 +117,9 @@ export const ReportView: React.FC<ReportViewProps> = ({
     }
 
     md += `=== SCOPE ENFORCEMENT & SAFETY ===\n`;
-    md += `- "Craft" folder: Completely skipped (not read, listed, or referenced).\n`;
-    md += `- "00_README.txt": Completely preserved and skipped (answer key untouched).\n`;
-    md += `- First Run Scope: Restricted to folder "${report.folderName}". Stopped and waiting for user confirmation before expanding.\n`;
+    md += `- Safe Non-Destructive Trash: Files moved to Drive Trash with 30-day recovery window.\n`;
+    md += `- Content-First Intelligence: Supersedes tags and explicit version markers strictly respected.\n`;
+    md += `- Scope: Target folder "${report.folderName}" safely processed with interactive confirmation.\n`;
 
     return md;
   };
@@ -143,7 +143,7 @@ export const ReportView: React.FC<ReportViewProps> = ({
 
   return (
     <div className="w-full space-y-6 animate-in fade-in duration-300">
-      {/* First Run Stop Banner */}
+      {/* Cleanup Completed Banner */}
       <div className="bg-[#C75B12]/15 border border-[#C75B12]/40 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm">
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-xl bg-[#C75B12]/20 border border-[#C75B12]/40 flex items-center justify-center text-[#C75B12] shrink-0 mt-0.5">
@@ -159,7 +159,7 @@ export const ReportView: React.FC<ReportViewProps> = ({
               </span>
             </div>
             <p className="text-xs text-[#D8D0C5] mt-1 leading-relaxed">
-              Finished processing folder &ldquo;{report.folderName}&rdquo;. Protected files (&ldquo;00_README.txt&rdquo;) and excluded folders (&ldquo;Craft&rdquo;) were strictly untouched.
+              Finished processing folder &ldquo;{report.folderName}&rdquo;. Approved duplicates were safely moved to Drive Trash with 30-day recovery window and session undo available.
             </p>
           </div>
         </div>

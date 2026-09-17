@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, Sparkles, FolderLock, FileCheck, Trash2, ArrowRight } from 'lucide-react';
+import { Shield, Sparkles, BrainCircuit, FileCheck, Trash2, ArrowRight, History } from 'lucide-react';
 
 interface AuthScreenProps {
   onSignIn: () => void;
@@ -21,42 +21,42 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignIn, isLoading, err
               Drive Cleanup Agent
             </h2>
             <p className="text-xs text-[#C9A86A] font-semibold mt-1 uppercase tracking-wider">
-              Document Processor &bull; TEST First Run
+              Document Processor &bull; Safe Duplicate Cleanup
             </p>
           </div>
         </div>
 
-        {/* Core Rules Brief */}
+        {/* Core Safeguards Brief */}
         <div className="bg-[#121212] border border-[#242424] rounded-2xl p-4 text-left space-y-2.5 text-xs text-[#D8D0C5]">
           <div className="flex items-start gap-2.5">
-            <FolderLock className="w-4 h-4 text-[#C75B12] shrink-0 mt-0.5" />
+            <Trash2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
             <div>
-              <strong className="text-[#F5E9DC]">Folder &ldquo;Craft&rdquo; Excluded:</strong>
-              <p className="text-[#888888]">Skipped completely. Contents are never read or referenced.</p>
+              <strong className="text-[#F5E9DC]">Non-Destructive Drive Trash:</strong>
+              <p className="text-[#888888]">Older duplicates moved to Drive Trash (not permanently deleted; 30-day recovery).</p>
             </div>
           </div>
 
           <div className="flex items-start gap-2.5">
-            <Shield className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+            <Shield className="w-4 h-4 text-[#C9A86A] shrink-0 mt-0.5" />
             <div>
-              <strong className="text-[#F5E9DC]">&ldquo;00_README.txt&rdquo; Protected:</strong>
-              <p className="text-[#888888]">Answer key is strictly untouched and not read.</p>
+              <strong className="text-[#F5E9DC]">Interactive Review Safeguard:</strong>
+              <p className="text-[#888888]">Pauses for explicit confirmation before trashing with quick side-by-side review.</p>
             </div>
           </div>
 
           <div className="flex items-start gap-2.5">
-            <Trash2 className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <BrainCircuit className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
             <div>
-              <strong className="text-[#F5E9DC]">Safe Drive Trash:</strong>
-              <p className="text-[#888888]">Older duplicates moved to Drive Trash (not permanently deleted).</p>
+              <strong className="text-[#F5E9DC]">Content-Aware Intelligence:</strong>
+              <p className="text-[#888888]">Explicit version markers (draft/final/v1/v2) supersede raw modified timestamps.</p>
             </div>
           </div>
 
           <div className="flex items-start gap-2.5">
-            <FileCheck className="w-4 h-4 text-[#C9A86A] shrink-0 mt-0.5" />
+            <History className="w-4 h-4 text-[#C75B12] shrink-0 mt-0.5" />
             <div>
-              <strong className="text-[#F5E9DC]">First Run Scope:</strong>
-              <p className="text-[#888888]">Only processes &ldquo;TEST&rdquo; folder, then pauses for confirmation.</p>
+              <strong className="text-[#F5E9DC]">Session Audit &amp; Instant Undo:</strong>
+              <p className="text-[#888888]">Every cleanup action is tracked with single-click restoration back to Drive.</p>
             </div>
           </div>
         </div>

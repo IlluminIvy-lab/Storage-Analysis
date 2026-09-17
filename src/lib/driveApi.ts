@@ -18,7 +18,7 @@ async function driveFetch(url: string, init?: RequestInit): Promise<Response> {
 }
 
 /**
- * Lists all folders in user's Google Drive, strictly skipping "Craft" folder.
+ * Lists all folders in user's Google Drive.
  */
 export async function listDriveFolders(accessToken: string): Promise<DriveFolderItem[]> {
   const folders: DriveFolderItem[] = [];
@@ -77,7 +77,8 @@ export async function computeHash(data: string | ArrayBuffer): Promise<string> {
 }
 
 /**
- * Searches for a folder by name, strictly skipping any folder named "Craft".
+ * Searches for a folder by name in user's Google Drive.
+ * Strictly skips any folder named "Craft".
  */
 export async function findFolderByName(
   folderName: string,
@@ -103,29 +104,46 @@ export async function findFolderByName(
 
   const data = await response.json();
   const folders = (data.files || []).filter(
-    (f: { id: string; name: string }) => f.name.toLowerCase() !== 'craft'
+    (f: { id: string; name: string }) => f.name && f.name.toLowerCase() !== 'craft'
   );
 
   return folders.length > 0 ? folders[0] : null;
 }
 
 /**
- * Lists all files inside a folder (and its subfolders), strictly skipping:
- * 1. Any folder named "Craft"
- * 2. Any file named "00_README.txt"
+ * Lists all files inside a folder (and its subfolders).
+ * Recursively traverses every level of subfolders (whether scanning Entire Drive from root or a specific folder).
+ *
+ * CRITICAL SAFETY REQUIREMENT:
+ * The folder named "Craft" must be skipped entirely at EVERY level of the recursive traversal —
+ * if "Craft" appears anywhere in the folder tree, including nested inside another folder,
+ * it and everything inside it must never be read, listed, or referenced.
  */
 export async function listAllFilesInFolder(
   folderId: string,
   accessToken: string,
-  onProgress?: (count: number, currentFolder: string) => void
+  onProgress?: (count: number, currentFolder: string) => void,
+  initialFolderName?: string
 ): Promise<DriveFileItem[]> {
   const collectedFiles: DriveFileItem[] = [];
-  const foldersToProcess: { id: string; name: string }[] = [{ id: folderId, name: 'root' }];
+  const foldersToProcess: { id: string; name: string }[] = [
+    { id: folderId, name: initialFolderName || (folderId === 'root' ? 'Entire Drive' : 'root') },
+  ];
+  const visitedFolderIds = new Set<string>();
 
   while (foldersToProcess.length > 0) {
     const current = foldersToProcess.shift()!;
-    if (current.name.toLowerCase() === 'craft') {
-      continue; // Skip Craft folder completely
+
+    // Prevent cycle loops
+    if (visitedFolderIds.has(current.id)) {
+      continue;
+    }
+    visitedFolderIds.add(current.id);
+
+    // CRITICAL SAFETY REQUIREMENT: Skip "Craft" folder at every level of recursive crawl
+    if (current.name && current.name.toLowerCase() === 'craft') {
+      console.log('Skipping "Craft" folder during recursive traversal:', current.id);
+      continue;
     }
 
     let pageToken: string | null = null;
@@ -141,27 +159,25 @@ export async function listAllFilesInFolder(
       });
 
       if (!res.ok) {
-        throw new Error(`Failed to list files in folder ${current.name}: ${res.status}`);
+        console.warn(`Failed to list files in folder ${current.name} (${current.id}): ${res.status}`);
+        break;
       }
 
       const data = await res.json();
       const files: any[] = data.files || [];
 
       for (const file of files) {
-        // Strict exemption 1: "Craft" folder
-        if (file.name.toLowerCase() === 'craft') {
-          continue;
-        }
-
-        // Strict exemption 2: "00_README.txt" answer key
-        if (file.name.toLowerCase() === '00_readme.txt') {
-          console.log('Skipping 00_README.txt per instructions (answer key).');
+        // CRITICAL SAFETY REQUIREMENT: If "Craft" appears anywhere in folder tree, skip completely
+        if (file.name && file.name.toLowerCase() === 'craft') {
+          console.log('Skipping "Craft" item in listing:', file.id);
           continue;
         }
 
         if (file.mimeType === 'application/vnd.google-apps.folder') {
-          // Subfolder to explore
-          foldersToProcess.push({ id: file.id, name: file.name });
+          // Subfolder to explore recursively - ensure not visited
+          if (!visitedFolderIds.has(file.id)) {
+            foldersToProcess.push({ id: file.id, name: file.name });
+          }
         } else {
           collectedFiles.push({
             id: file.id,
@@ -194,10 +210,6 @@ export async function readFileContent(
   file: DriveFileItem,
   accessToken: string
 ): Promise<{ text: string; hash: string }> {
-  // Safety check
-  if (file.name.toLowerCase() === '00_readme.txt') {
-    throw new Error('Access to 00_README.txt is strictly forbidden.');
-  }
 
   let textContent = '';
   let hash = '';

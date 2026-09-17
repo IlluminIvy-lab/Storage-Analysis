@@ -21,6 +21,7 @@ import {
   AlertTriangle,
   RotateCcw,
   ShieldAlert,
+  Eye,
 } from 'lucide-react';
 import { DuplicateMatch, DriveFileItem, ViewMode } from '../types';
 import { generateQuickSummary, suggestSmartFolder, suggestSmartRename } from '../lib/smartFileIntelligence';
@@ -39,6 +40,7 @@ interface MatchesViewProps {
   onSelectAll?: (ids?: string[]) => void;
   onDeselectAll: () => void;
   onOpenComparison: (match: DuplicateMatch) => void;
+  onOpenQuickView?: (file: DriveFileItem, match?: DuplicateMatch) => void;
   onOpenSmartRename: (file: DriveFileItem) => void;
   onOpenSmartFolder: (file: DriveFileItem) => void;
   onTrashSingle?: (match: DuplicateMatch) => void;
@@ -58,6 +60,7 @@ export const MatchesView: React.FC<MatchesViewProps> = ({
   onSelectAll,
   onDeselectAll,
   onOpenComparison,
+  onOpenQuickView,
   onOpenSmartRename,
   onOpenSmartFolder,
   onTrashSingle,
@@ -91,9 +94,17 @@ export const MatchesView: React.FC<MatchesViewProps> = ({
     else if (onBulkTrash) onBulkTrash(selected);
   };
 
-  // Combine matches if uncertain requested
+  // Combine matches if uncertain requested (deduplicated by match id)
   const allCandidateMatches = useMemo(() => {
-    return [...matches, ...uncertainMatches];
+    const seen = new Set<string>();
+    const combined: DuplicateMatch[] = [];
+    for (const m of [...matches, ...uncertainMatches]) {
+      if (!seen.has(m.id)) {
+        seen.add(m.id);
+        combined.push(m);
+      }
+    }
+    return combined;
   }, [matches, uncertainMatches]);
 
   // Counts for category badges
@@ -662,15 +673,29 @@ export const MatchesView: React.FC<MatchesViewProps> = ({
 
                 {/* Footer Actions */}
                 <div className="pt-2 border-t border-[#262626] flex items-center justify-between">
-                  <button
-                    onClick={() => onOpenComparison(m)}
-                    className={`text-xs flex items-center gap-1 font-semibold cursor-pointer ${
-                      isDivergent ? 'text-amber-300 hover:text-amber-200' : 'text-[#C9A86A] hover:text-[#F5E9DC]'
-                    }`}
-                  >
-                    <GitCompare className="w-3.5 h-3.5" />
-                    <span>{isDivergent ? 'Inspect Divergent Diff' : 'Diff Comparison'}</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {onOpenQuickView && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenQuickView(m.targetFile, m)}
+                        className="px-2.5 py-1 rounded-lg bg-[#222222] hover:bg-[#2c2c2c] border border-[#383838] text-xs font-semibold text-[#F5E9DC] hover:text-[#C9A86A] flex items-center gap-1 cursor-pointer transition-colors"
+                        title="Quick View snippet & last modified date"
+                      >
+                        <Eye className="w-3.5 h-3.5 text-[#C75B12]" />
+                        <span>Quick View</span>
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => onOpenComparison(m)}
+                      className={`text-xs flex items-center gap-1 font-semibold cursor-pointer ${
+                        isDivergent ? 'text-amber-300 hover:text-amber-200' : 'text-[#C9A86A] hover:text-[#F5E9DC]'
+                      }`}
+                    >
+                      <GitCompare className="w-3.5 h-3.5" />
+                      <span>{isDivergent ? 'Inspect Diff' : 'Full Diff'}</span>
+                    </button>
+                  </div>
 
                   <div className="flex items-center gap-2">
                     <a
@@ -756,6 +781,19 @@ export const MatchesView: React.FC<MatchesViewProps> = ({
 
                     {/* Right: Badges & Quick Action Icons */}
                     <div className="flex flex-wrap items-center gap-2 shrink-0 self-end sm:self-auto">
+                      {/* Quick View Button */}
+                      {onOpenQuickView && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenQuickView(m.targetFile, m)}
+                          className="px-2.5 py-1 rounded-md bg-[#242424] hover:bg-[#2f2f2f] border border-[#3a3a3a] text-xs font-semibold text-[#F5E9DC] hover:text-[#C9A86A] flex items-center gap-1 cursor-pointer transition-colors"
+                          title="Quick View document snippet & last modified date"
+                        >
+                          <Eye className="w-3.5 h-3.5 text-[#C75B12]" />
+                          <span>Quick View</span>
+                        </button>
+                      )}
+
                       {/* Smart Folder Tag */}
                       <button
                         type="button"

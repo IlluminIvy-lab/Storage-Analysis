@@ -29,7 +29,7 @@ export const ScanProgress: React.FC<ScanProgressProps> = ({
     },
     {
       id: 'fetching',
-      label: 'Enumerate files (exclude Craft & 00_README)',
+      label: 'Enumerate and index Drive files',
       icon: FileText,
       active: stage === 'fetching_files',
       done: ['reading_contents', 'analyzing_duplicates', 'ready_for_review', 'trashing', 'completed'].includes(stage),

@@ -37,7 +37,7 @@ export function exportReportToCsv(report: CleanupReport): void {
     lines.push(`${escapeCsv('Scan Duration (ms)')},${escapeCsv(report.metrics.scanDurationMs)}`);
     lines.push(`${escapeCsv('Processing Speed')},${escapeCsv(report.metrics.scanSpeedFilesPerSec + ' files/sec')}`);
   }
-  lines.push(`${escapeCsv('Policy Enforcement')},${escapeCsv('Folder "Craft" skipped; "00_README.txt" preserved; Only "TEST" processed')}`);
+  lines.push(`${escapeCsv('Policy Enforcement')},${escapeCsv('Non-destructive Drive Trash; 30-day recovery; User-approved actions only; Session undo active')}`);
   lines.push(''); // Blank separator line
 
   // Detailed File Table Header

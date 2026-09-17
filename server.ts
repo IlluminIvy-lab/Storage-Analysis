@@ -85,8 +85,8 @@ app.post("/api/gemini/cleanup-insight", async (req, res) => {
       });
     }
 
-    // Prepare concise summary of duplicate files for Gemini
-    const sampleItems = matches.slice(0, 40).map((m: any) => {
+    // Prepare concise summary of duplicate files for Gemini (limit to 25 items for fast processing)
+    const sampleItems = matches.slice(0, 25).map((m: any) => {
       const targetName = m.name || m.targetFile?.name || "Unknown";
       const originalName = m.originalName || m.keptOriginalFile?.name || "Original";
       const type = m.type === "exact" ? "exact duplicate" : "draft / older version";
@@ -110,22 +110,49 @@ STRICT RULES:
 2. Do NOT use bullet points, greetings, quotes, or markdown bolding.
 3. Keep it natural, conversational, and direct.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: prompt,
-    });
+    // Fast call helper with timeout
+    const callGeminiWithTimeout = async (modelName: string, timeoutMs = 5000): Promise<string | null> => {
+      try {
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs)
+        );
+        const apiPromise = ai.models.generateContent({
+          model: modelName,
+          contents: prompt,
+        });
 
-    const insightText = response.text?.trim().replace(/^["']|["']$/g, "") || generateFallbackInsight();
+        const res = await Promise.race([apiPromise, timeoutPromise]);
+        const text = res.text?.trim().replace(/^["']|["']$/g, "");
+        return text || null;
+      } catch (e: any) {
+        console.warn(`Gemini (${modelName}) unavailable or timed out:`, e?.message || e);
+        return null;
+      }
+    };
+
+    // Try gemini-3.8-flash first; if unavailable (503) or timed out, try gemini-3.1-flash-lite
+    let insightText = await callGeminiWithTimeout("gemini-3.8-flash", 5000);
+    if (!insightText) {
+      insightText = await callGeminiWithTimeout("gemini-3.1-flash-lite", 4000);
+    }
+
+    // If Gemini succeeded, return AI insight; otherwise seamlessly use tailored heuristic
+    if (insightText) {
+      return res.json({
+        insight: insightText,
+        source: "gemini",
+      });
+    }
 
     return res.json({
-      insight: insightText,
-      source: "gemini",
+      insight: generateFallbackInsight(),
+      source: "heuristic_fallback",
     });
   } catch (err: any) {
-    console.error("Error generating cleanup insight via Gemini:", err);
+    console.warn("Generating fallback cleanup insight due to API unavailability:", err?.message || err);
     // Graceful fallback so UI never breaks
     return res.json({
-      insight: "Most duplicates identified are older revision drafts and identical copies of your working documents.",
+      insight: "Most duplicates identified are older revision drafts and redundant copies of your working documents.",
       source: "error_fallback",
     });
   }

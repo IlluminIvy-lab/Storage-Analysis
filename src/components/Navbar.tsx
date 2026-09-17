@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldCheck, LogOut, FolderLock, Sparkles, Trash2, FolderSync, History, RefreshCw, AlertCircle } from 'lucide-react';
+import { ShieldCheck, LogOut, Sparkles, Trash2, FolderSync, History, RefreshCw, Menu } from 'lucide-react';
 import { User } from 'firebase/auth';
 
 interface NavbarProps {
@@ -12,6 +12,7 @@ interface NavbarProps {
   activityCount?: number;
   isTokenExpired?: boolean;
   onRefreshToken?: () => void;
+  onOpenLeftDrawer?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -24,12 +25,25 @@ export const Navbar: React.FC<NavbarProps> = ({
   activityCount = 0,
   isTokenExpired = false,
   onRefreshToken,
+  onOpenLeftDrawer,
 }) => {
   return (
     <header className="w-full bg-[#161616] border-b border-[#252525] px-4 py-2.5 sticky top-0 z-30">
       <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
         <div className="flex items-center justify-between sm:justify-start gap-3">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
+            {onOpenLeftDrawer && (
+              <button
+                id="open-left-drawer-btn"
+                onClick={onOpenLeftDrawer}
+                title="Open Navigation, Appearance & Policy Menu"
+                className="p-2 rounded-xl bg-[#202020] hover:bg-[#282828] border border-[#333333] text-[#F5E9DC] transition-colors cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
+                aria-label="Open left drawer menu"
+              >
+                <Menu className="w-5 h-5 text-[#C75B12]" />
+              </button>
+            )}
+
             <div className="w-10 h-10 rounded-xl bg-[#C75B12]/20 border border-[#C75B12]/40 flex items-center justify-center text-[#C75B12] shadow-sm shrink-0">
               <Sparkles className="w-5 h-5" />
             </div>
@@ -38,13 +52,12 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <h1 className="text-base sm:text-lg font-bold text-[#F5E9DC] tracking-tight leading-none">
                   Drive Cleanup Agent
                 </h1>
-                <span className="text-[10px] font-semibold bg-[#C75B12]/25 text-[#F5E9DC] px-2 py-0.5 rounded-full border border-[#C75B12]/30">
-                  TEST Scope
+                <span className="text-[10px] font-semibold bg-[#C75B12]/20 text-[#C9A86A] px-2 py-0.5 rounded-full border border-[#C75B12]/30">
+                  Active
                 </span>
               </div>
               <p className="text-[11px] text-[#A0988E] flex items-center gap-1 mt-0.5">
-                <FolderLock className="w-3 h-3 text-[#C9A86A]" />
-                <span>&ldquo;Craft&rdquo; skipped &bull; 00_README protected</span>
+                <span>Safe duplication and draft version manager</span>
               </p>
             </div>
           </div>

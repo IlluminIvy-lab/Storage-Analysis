@@ -117,7 +117,7 @@ export const ScanMetricsCard: React.FC<ScanMetricsCardProps> = ({
               {metrics.totalScanned}
             </span>
             <p className="text-[10px] text-[#888888] mt-0.5">
-              excluding Craft & 00_README
+              indexed in target folder
             </p>
           </div>
         </div>

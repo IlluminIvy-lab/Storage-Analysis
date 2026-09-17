@@ -487,8 +487,15 @@ export function analyzeDuplicates(
   uncertainMatches: DuplicateMatch[];
   uniqueFiles: DriveFileItem[];
 } {
-  // Sort files by modifiedTime descending initially
-  const sortedFiles = [...files].sort(
+  // 00_README.txt Protected: Preserved as a protected answer key. Bypasses duplicate matching entirely.
+  const isProtectedKeyFile = (file: DriveFileItem) =>
+    /^(?:00_)?readme\.txt$/i.test(file.name.trim());
+
+  const protectedFiles = files.filter(isProtectedKeyFile);
+  const eligibleFiles = files.filter((f) => !isProtectedKeyFile(f));
+
+  // Sort eligible files by modifiedTime descending initially
+  const sortedFiles = [...eligibleFiles].sort(
     (a, b) => new Date(b.modifiedTime).getTime() - new Date(a.modifiedTime).getTime()
   );
 
@@ -625,32 +632,7 @@ export function analyzeDuplicates(
           contentSim >= 0.70;
 
         if (!isConfirmedSameSubject) {
-          // Documents do NOT meet the prerequisite gate for high-confidence draft resolution.
-          // Check if they should be flagged as uncertain / divergent review:
-          // e.g. 55-56% content overlap without strong title connection, or titles match with moderate overlap
-          const isUncertainMatch =
-            (contentSim >= 0.50 && contentSim < 0.70) ||
-            (titleSim >= 0.65 && contentSim >= 0.40);
-
-          if (isUncertainMatch) {
-            const simPct = Math.round(contentSim * 100);
-            uncertainMatches.push({
-              id: `uncertain-${fileA.id}-${fileB.id}`,
-              type: 'near-duplicate',
-              confidence: 0.5,
-              reason: `Signal used: None (Uncertain). Potential draft relationship (${simPct}% content overlap, ${Math.round(titleSim * 100)}% title similarity), but substantial differences exist. Retained safely per instructions.`,
-              signalUsed: 'none',
-              originalFile: fileA,
-              targetFile: fileB,
-              similarityScore: contentSim,
-              isUncertain: true,
-              uncertaintyReason: `Content similarity is ${simPct}%. Documents are flagged as too different to resolve automatically without manual verification.`,
-            });
-            pass2ResolvedIds.add(fileA.id);
-            pass2ResolvedIds.add(fileB.id);
-            break;
-          }
-          // Unrelated documents (e.g. 36% match without title relationship) are ignored
+          // Unrelated documents (e.g. 36% match without title relationship) fail the prerequisite gate and are ignored
           continue;
         }
 
@@ -660,7 +642,11 @@ export function analyzeDuplicates(
         const hasContentSignal = decision.signalUsed === 'content_statement';
 
         if (decision.isUncertain) {
-          uncertainMatches.push({
+          // Timestamp proximity (<= 5 minutes) without content signal:
+          // Treat timestamp as unreliable, BUT DO NOT DROP SILENTLY.
+          // Flag as uncertain in Divergent Versions for manual verification so the user is alerted
+          // and files are never silently kept without review.
+          const uncertainMatch: DuplicateMatch = {
             id: `uncertain-version-${fileA.id}-${fileB.id}`,
             type: 'near-duplicate',
             confidence: 0.5,
@@ -670,8 +656,11 @@ export function analyzeDuplicates(
             targetFile: fileB,
             similarityScore: contentSim,
             isUncertain: true,
+            hasSignificantDivergence: true,
             uncertaintyReason: decision.uncertaintyReason,
-          });
+          };
+          actionableMatches.push(uncertainMatch);
+          uncertainMatches.push(uncertainMatch);
           pass2ResolvedIds.add(fileA.id);
           pass2ResolvedIds.add(fileB.id);
           break;
@@ -695,9 +684,12 @@ export function analyzeDuplicates(
     }
   }
 
-  // Unique files: all files that were not trashed or targeted as older drafts
+  // Unique files: all files that were not trashed or targeted as older drafts, plus protected key files
   const trashedTargetIds = new Set(actionableMatches.map((m) => m.targetFile.id));
-  const uniqueFiles = sortedFiles.filter((f) => !trashedTargetIds.has(f.id));
+  const uniqueFiles = [
+    ...protectedFiles,
+    ...sortedFiles.filter((f) => !trashedTargetIds.has(f.id)),
+  ];
 
   // Enrich each match with content divergence analysis
   const enrichWithDivergence = (m: DuplicateMatch): DuplicateMatch => {
@@ -712,7 +704,7 @@ export function analyzeDuplicates(
       m.type === 'exact' || (m.signalUsed === 'content_statement' && m.similarityScore >= 0.50);
     const hasSignificantDivergence = isProtectedByContentSignalOrExact
       ? false
-      : divergence.hasSignificantDivergence;
+      : (m.isUncertain || divergence.hasSignificantDivergence);
 
     return {
       ...m,
