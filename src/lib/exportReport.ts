@@ -1,14 +1,22 @@
 import { CleanupReport } from '../types';
 import { formatBytes, getEstimatedFileSize } from './formatters';
+import { isProtectedFile } from './cleanupActionGate';
 
 export type ReportExportFormat = 'csv' | 'markdown' | 'text';
 
 /**
- * Escapes a field for RFC 4180 CSV compliance.
+ * Escapes a field for RFC 4180 CSV compliance with formula injection protection (CWE-1236).
  */
-function escapeCsv(val: any): string {
+export function escapeCsv(val: any): string {
   if (val === undefined || val === null) return '""';
-  const str = String(val);
+  let str = String(val);
+
+  // Formula injection mitigation: if field starts with =, +, -, @, \t, or \r, prefix with a single quote
+  if (/^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
+
+  // Always escape double quotes by doubling them
   if (str.includes('"') || str.includes(',') || str.includes('\n') || str.includes('\r')) {
     return `"${str.replace(/"/g, '""')}"`;
   }
@@ -16,10 +24,24 @@ function escapeCsv(val: any): string {
 }
 
 /**
+ * Robust date formatting for CSV export that prevents timezone distortions and handles invalid dates gracefully.
+ */
+export function formatDateForCsv(dateVal?: string | number | Date): string {
+  if (!dateVal || dateVal === 'N/A') return 'N/A';
+  try {
+    const d = new Date(dateVal);
+    if (isNaN(d.getTime())) return String(dateVal);
+    return d.toISOString();
+  } catch {
+    return String(dateVal);
+  }
+}
+
+/**
  * Checks if a filename corresponds to protected key documentation.
  */
 export const isProtectedKeyFile = (fileName?: string): boolean =>
-  /^(?:00_)?readme\.txt$/i.test(fileName?.trim() || '');
+  isProtectedFile(fileName);
 
 /**
  * Helper to trigger a browser file download.
@@ -181,10 +203,10 @@ export function exportReportToCsv(report: CleanupReport): void {
       escapeCsv(sizeBytes),
       escapeCsv(formatBytes(sizeBytes)),
       escapeCsv(file.mimeType),
-      escapeCsv(new Date(file.modifiedTime).toISOString()),
+      escapeCsv(formatDateForCsv(file.modifiedTime)),
       escapeCsv(item.keptOriginalFile?.name || 'N/A'),
       escapeCsv(item.keptOriginalFile?.id || 'N/A'),
-      escapeCsv(item.keptOriginalFile ? new Date(item.keptOriginalFile.modifiedTime).toISOString() : 'N/A'),
+      escapeCsv(item.keptOriginalFile ? formatDateForCsv(item.keptOriginalFile.modifiedTime) : 'N/A'),
       escapeCsv(signalLabel),
       escapeCsv(similarityCell),
       escapeCsv(item.reason),
@@ -215,16 +237,16 @@ export function exportReportToCsv(report: CleanupReport): void {
       escapeCsv(sizeBytes),
       escapeCsv(formatBytes(sizeBytes)),
       escapeCsv(targetFile.mimeType),
-      escapeCsv(new Date(targetFile.modifiedTime).toISOString()),
+      escapeCsv(formatDateForCsv(targetFile.modifiedTime)),
       escapeCsv(item.fileA?.name || 'N/A'),
       escapeCsv(item.fileA?.id || 'N/A'),
-      escapeCsv(item.fileA ? new Date(item.fileA.modifiedTime).toISOString() : 'N/A'),
+      escapeCsv(item.fileA ? formatDateForCsv(item.fileA.modifiedTime) : 'N/A'),
       escapeCsv('None (Uncertain / Conflicting)'),
       escapeCsv(uncertainSimCell),
       escapeCsv(`Flagged: ${item.reason} - Kept in place without action per strict safety threshold`),
       escapeCsv('Active in Drive (Untouched)'),
       escapeCsv(report.folderName),
-      escapeCsv(report.timestamp),
+      escapeCsv(formatDateForCsv(report.timestamp)),
     ].join(','));
   });
 
@@ -243,7 +265,7 @@ export function exportReportToCsv(report: CleanupReport): void {
       escapeCsv(sizeBytes),
       escapeCsv(formatBytes(sizeBytes)),
       escapeCsv(file.mimeType),
-      escapeCsv(new Date(file.modifiedTime).toISOString()),
+      escapeCsv(formatDateForCsv(file.modifiedTime)),
       escapeCsv('N/A (Unique or Latest Copy)'),
       escapeCsv('N/A'),
       escapeCsv('N/A'),

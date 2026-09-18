@@ -64,6 +64,11 @@ import {
   evaluateAutoSelectMatchIds,
   realignMatchWithPreferences,
 } from './lib/autoSelectUtils';
+import {
+  validateCleanupPlan,
+  validateFinalTrashCandidate,
+  isCleanupEligible,
+} from './lib/cleanupActionGate';
 import { Navbar } from './components/Navbar';
 import { AuthScreen } from './components/AuthScreen';
 import { ScanProgress } from './components/ScanProgress';
@@ -638,31 +643,77 @@ export default function App() {
     const accessToken = token || getAccessToken();
     if (!accessToken) return;
 
-    const matchesToTrash =
+    const candidateMatches =
       selectedMatchIds.length > 0
         ? actionableMatches.filter((m) => selectedMatchIds.includes(m.id))
         : actionableMatches;
 
-    if (matchesToTrash.length === 0) return;
+    if (candidateMatches.length === 0) return;
+
+    // Centralized Safety Gate: Validate entire cleanup plan before execution
+    const { validMatches, rejectedMatches } = validateCleanupPlan(candidateMatches);
+
+    if (rejectedMatches.length > 0) {
+      console.warn(
+        `Safety gate excluded ${rejectedMatches.length} matches from plan execution:`,
+        rejectedMatches
+      );
+    }
+
+    if (validMatches.length === 0) {
+      setErrorMessage(
+        `No eligible files to trash. ${rejectedMatches.length} file(s) require manual review or are protected.`
+      );
+      setIsConfirmationOpen(false);
+      return;
+    }
+
+    const approvedPlanTargetIds = new Set(validMatches.map((m) => m.targetFile.id));
 
     setIsTrashing(true);
     setScanStage('trashing');
     setProcessedCount(0);
-    setTotalCount(matchesToTrash.length);
+    setTotalCount(validMatches.length);
 
     const trashedResults: CleanupReport['trashedFiles'] = [];
     let exactCount = 0;
     let draftCount = 0;
 
-    for (let i = 0; i < matchesToTrash.length; i++) {
+    for (let i = 0; i < validMatches.length; i++) {
       if (isCancelledRef.current) {
         setCurrentActionText('Trashing stopped by user.');
         break;
       }
 
-      const match = matchesToTrash[i];
+      const match = validMatches[i];
+
+      // Final individual candidate verification right before API call
+      const finalCheck = validateFinalTrashCandidate(match.targetFile.id, match.targetFile, {
+        currentScannedFiles: scannedFiles,
+        alreadyTrashedIds: new Set(sessionTrashedFileIds),
+        approvedPlanTargetIds,
+        isPlanApproved: true,
+      });
+
+      if (!finalCheck.valid) {
+        console.warn(`Final safety check rejected file "${match.targetFile.name}": ${finalCheck.reason}`);
+        trashedResults.push({
+          trashedFile: match.targetFile,
+          keptOriginalFile: match.originalFile,
+          type: match.type,
+          reason: match.reason,
+          signalUsed: match.signalUsed,
+          similarity: match.similarityScore,
+          comparisonMethod: match.comparisonMethod,
+          trashedSuccess: false,
+          error: `Safety Gate Blocked: ${finalCheck.reason}`,
+        });
+        setProcessedCount(i + 1);
+        continue;
+      }
+
       setCurrentActionText(
-        `Moving older copy "${match.targetFile.name}" to Drive Trash (${i + 1}/${matchesToTrash.length})...`
+        `Moving older copy "${match.targetFile.name}" to Drive Trash (${i + 1}/${validMatches.length})...`
       );
 
       try {
@@ -746,7 +797,7 @@ export default function App() {
     setIsTrashing(false);
     setIsConfirmationOpen(false);
     setScanStage('completed');
-    fetchGeminiInsight(generatedReport, matchesToTrash);
+    fetchGeminiInsight(generatedReport, validMatches);
 
     // Register Bulk Action in History with 9-second Undo Window
     if (successfulTrashed.length > 0) {
@@ -849,6 +900,23 @@ export default function App() {
     const accessToken = token || getAccessToken();
     if (!accessToken) return;
 
+    // Safety Gate: Verify eligibility and final candidate state
+    const eligibility = isCleanupEligible(match);
+    if (!eligibility.eligible) {
+      setErrorMessage(`Cannot trash "${match.targetFile.name}": ${eligibility.reason}`);
+      return;
+    }
+
+    const finalCheck = validateFinalTrashCandidate(match.targetFile.id, match.targetFile, {
+      currentScannedFiles: scannedFiles,
+      alreadyTrashedIds: new Set(sessionTrashedFileIds),
+      isPlanApproved: true,
+    });
+    if (!finalCheck.valid) {
+      setErrorMessage(`Cannot trash "${match.targetFile.name}": ${finalCheck.reason}`);
+      return;
+    }
+
     await moveFileToTrash(match.targetFile.id, accessToken);
     setActionableMatches((prev) => prev.filter((m) => m.id !== match.id));
     setSessionTrashedFileIds((prev) => [...prev, match.targetFile.id]);
@@ -872,8 +940,35 @@ export default function App() {
     const accessToken = token || getAccessToken();
     if (!accessToken || matchesToTrash.length === 0) return;
 
+    // Centralized Safety Gate: validate bulk candidate batch
+    const { validMatches, rejectedMatches } = validateCleanupPlan(matchesToTrash);
+    if (rejectedMatches.length > 0) {
+      console.warn(`Bulk trash filtered out ${rejectedMatches.length} ineligible matches:`, rejectedMatches);
+    }
+
+    if (validMatches.length === 0) {
+      setErrorMessage(
+        `None of the selected ${matchesToTrash.length} files are eligible for trash cleanup (protected or require review).`
+      );
+      return;
+    }
+
+    const approvedPlanTargetIds = new Set(validMatches.map((m) => m.targetFile.id));
     const trashedResults: DriveFileItem[] = [];
-    for (const m of matchesToTrash) {
+
+    for (const m of validMatches) {
+      const finalCheck = validateFinalTrashCandidate(m.targetFile.id, m.targetFile, {
+        currentScannedFiles: scannedFiles,
+        alreadyTrashedIds: new Set(sessionTrashedFileIds),
+        approvedPlanTargetIds,
+        isPlanApproved: true,
+      });
+
+      if (!finalCheck.valid) {
+        console.warn(`Safety gate skipped "${m.targetFile.name}": ${finalCheck.reason}`);
+        continue;
+      }
+
       try {
         await moveFileToTrash(m.targetFile.id, accessToken);
         trashedResults.push(m.targetFile);
@@ -1508,9 +1603,11 @@ export default function App() {
       <ConfirmationModal
         isOpen={isConfirmationOpen}
         matchesToTrash={
-          selectedMatchIds.length > 0
-            ? actionableMatches.filter((m) => selectedMatchIds.includes(m.id))
-            : actionableMatches
+          validateCleanupPlan(
+            selectedMatchIds.length > 0
+              ? actionableMatches.filter((m) => selectedMatchIds.includes(m.id))
+              : actionableMatches
+          ).validMatches
         }
         onConfirm={handleConfirmTrash}
         onCancel={() => setIsConfirmationOpen(false)}

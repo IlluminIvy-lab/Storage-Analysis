@@ -5,6 +5,7 @@ import {
   DriveFileItem,
   KeeperPreference,
 } from '../types';
+import { isCleanupEligible } from './cleanupActionGate';
 
 const STORAGE_KEY = 'notes_by_ivy_auto_select_prefs';
 
@@ -246,6 +247,11 @@ export function evaluateAutoSelectMatchIds(
   const selectedIds: string[] = [];
 
   for (const match of matches) {
+    // Strict Safety Gate: Do not auto-select matches that fail the cleanup eligibility gate
+    if (!isCleanupEligible(match)) {
+      continue;
+    }
+
     // Safety check for uncertain matches
     if (match.isUncertain) {
       if (p.autoSelectUncertain) {

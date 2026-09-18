@@ -26,7 +26,22 @@ export interface DriveFileItem {
   };
 }
 
-export type DuplicateType = 'exact' | 'near-duplicate' | 'unique';
+export type ClassificationType =
+  | 'byte-exact'
+  | 'content-exact'
+  | 'near-duplicate'
+  | 'probable-candidate'
+  | 'unreadable'
+  | 'not-duplicate';
+
+export type DuplicateType =
+  | 'exact'
+  | 'near-duplicate'
+  | 'unique'
+  | 'byte-exact'
+  | 'content-exact'
+  | 'probable-candidate'
+  | 'unreadable';
 
 export type ViewMode = 'grid' | 'list';
 
@@ -82,6 +97,7 @@ export interface ContentDivergenceInfo {
 export interface DuplicateMatch {
   id: string;
   type: DuplicateType;
+  classification?: ClassificationType;
   confidence: number; // 0 to 1
   reason: string;
   signalUsed?: 'content_statement' | 'modified_timestamp' | 'size_and_name' | 'none';
@@ -94,6 +110,9 @@ export interface DuplicateMatch {
   uncertaintyReason?: string;
   hasSignificantDivergence?: boolean;
   divergenceInfo?: ContentDivergenceInfo;
+  requiresManualReview?: boolean;
+  deletionEligible?: boolean;
+  contentVerified?: boolean;
 }
 
 export interface CleanupMetrics {
@@ -172,14 +191,14 @@ export interface AutoSelectPreferences {
 }
 
 export const DEFAULT_AUTO_SELECT_PREFERENCES: AutoSelectPreferences = {
-  enabled: true,
+  enabled: false,
   keeperPreference: 'newer',
   secondaryPreference: 'largest',
   respectContentSignals: true,
-  autoSelectExact: true,
-  autoSelectDrafts: true,
+  autoSelectExact: false,
+  autoSelectDrafts: false,
   autoSelectDivergent: false,
   minSimilarityThreshold: 0.75,
   autoSelectUncertain: false,
-  autoApplyOnScan: true,
+  autoApplyOnScan: false,
 };

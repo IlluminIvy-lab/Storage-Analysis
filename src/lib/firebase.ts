@@ -19,11 +19,19 @@ setPersistence(auth, browserLocalPersistence).catch((err) => {
   console.warn('Could not set browserLocalPersistence for Firebase Auth:', err);
 });
 
-// Storage Keys for persistent Google Workspace connection
+import {
+  setAccessToken as setInMemoryToken,
+  getAccessToken as getInMemoryToken,
+  isTokenExpired as isInMemoryTokenExpired,
+  clearAccessToken as clearInMemoryToken,
+  purgeLegacyStorageTokens,
+} from './tokenManager';
+
+// Purge any legacy Web Storage tokens immediately
+purgeLegacyStorageTokens();
+
+// Storage Keys for cached user profile (NO tokens)
 export const STORAGE_KEYS = {
-  TOKEN: 'drive_workspace_access_token',
-  TIMESTAMP: 'drive_workspace_token_timestamp',
-  EXPIRES_AT: 'drive_workspace_token_expires_at',
   USER: 'drive_workspace_cached_user',
 };
 
@@ -36,33 +44,15 @@ export interface CachedUserData {
 
 // Token and User persistence utilities
 export const saveStoredToken = (token: string, expiresInSeconds: number = 3540) => {
-  try {
-    localStorage.setItem(STORAGE_KEYS.TOKEN, token);
-    const now = Date.now();
-    localStorage.setItem(STORAGE_KEYS.TIMESTAMP, now.toString());
-    localStorage.setItem(STORAGE_KEYS.EXPIRES_AT, (now + expiresInSeconds * 1000).toString());
-  } catch (err) {
-    console.warn('Failed to save OAuth token to localStorage:', err);
-  }
+  setInMemoryToken(token, expiresInSeconds);
 };
 
 export const getStoredToken = (): string | null => {
-  try {
-    return localStorage.getItem(STORAGE_KEYS.TOKEN);
-  } catch {
-    return null;
-  }
+  return getInMemoryToken();
 };
 
 export const isStoredTokenExpired = (): boolean => {
-  try {
-    const expiresAt = localStorage.getItem(STORAGE_KEYS.EXPIRES_AT);
-    if (!expiresAt) return false;
-    // Consider token expired if within 60 seconds of expiration
-    return Date.now() >= parseInt(expiresAt, 10) - 60000;
-  } catch {
-    return false;
-  }
+  return isInMemoryTokenExpired();
 };
 
 export const saveCachedUser = (user: User | CachedUserData) => {
@@ -89,14 +79,20 @@ export const getCachedUser = (): CachedUserData | null => {
 };
 
 export const clearStoredAuth = () => {
+  clearInMemoryToken();
   try {
-    localStorage.removeItem(STORAGE_KEYS.TOKEN);
-    localStorage.removeItem(STORAGE_KEYS.TIMESTAMP);
-    localStorage.removeItem(STORAGE_KEYS.EXPIRES_AT);
     localStorage.removeItem(STORAGE_KEYS.USER);
   } catch (err) {
     console.warn('Failed to clear stored auth in localStorage:', err);
   }
+};
+
+export const getAccessToken = (): string | null => {
+  return getInMemoryToken();
+};
+
+export const setAccessToken = (token: string | null, expiresInSeconds: number = 3540) => {
+  setInMemoryToken(token, expiresInSeconds);
 };
 
 let cachedAccessToken: string | null = getStoredToken();
@@ -175,20 +171,6 @@ export const googleSignIn = async (options?: {
   }
 };
 
-export const getAccessToken = (): string | null => {
-  return cachedAccessToken || getStoredToken();
-};
-
-export const setAccessToken = (token: string | null) => {
-  cachedAccessToken = token;
-  if (token) {
-    saveStoredToken(token);
-  } else {
-    try {
-      localStorage.removeItem(STORAGE_KEYS.TOKEN);
-    } catch {}
-  }
-};
 
 /**
  * Explicit user logout. Wipes persistent tokens and signs out of Firebase.

@@ -1,5 +1,6 @@
 import { DriveFileItem, DuplicateMatch, AutoSelectPreferences } from '../types';
 import { detectContentDivergence } from './smartFileIntelligence';
+import { isProtectedFile } from './cleanupActionGate';
 
 /**
  * Normalizes text by removing non-alphanumeric noise and extra whitespaces.
@@ -602,7 +603,7 @@ export function analyzeDuplicates(
 } {
   // 00_README.txt Protected: Preserved as a protected answer key. Bypasses duplicate matching entirely.
   const isProtectedKeyFile = (file: DriveFileItem) =>
-    /^(?:00_)?readme\.txt$/i.test(file.name.trim());
+    isProtectedFile(file.name);
 
   const protectedFiles = files.filter(isProtectedKeyFile);
   const eligibleFiles = files.filter((f) => !isProtectedKeyFile(f));
@@ -686,9 +687,11 @@ export function analyzeDuplicates(
           }
         }
 
-        // Determine comparison method
+        // Determine comparison method and classification
         const isBothExtracted = fileA.contentStatus === 'extracted' && fileB.contentStatus === 'extracted';
-        const comparisonMethod = isBothExtracted ? 'text_similarity' : 'binary_checksum_match';
+        const isBothDocs =
+          (fileA.mimeType && fileA.mimeType.startsWith('application/vnd.google-apps.')) ||
+          (fileB.mimeType && fileB.mimeType.startsWith('application/vnd.google-apps.'));
 
         const decision = decideNewerVersion(fileA, fileB, 'exact', options?.preferences);
         const isFileACopy = hasCopySuffix(fileA.name);
@@ -697,25 +700,66 @@ export function analyzeDuplicates(
           ? `"${decision.keeper.name}" is retained as original, while duplicate copy "${decision.olderOrDuplicate.name}" has a copy suffix.`
           : `"${decision.keeper.name}" modified ${new Date(decision.keeper.modifiedTime).toLocaleDateString()} vs "${decision.olderOrDuplicate.name}" on ${new Date(decision.olderOrDuplicate.modifiedTime).toLocaleDateString()}.`;
 
-        const detailedReason = isBothExtracted
-          ? `Exact byte/hash-identical duplicate verified by identical content and text. ${nameReason}`
-          : `Exact byte-identical binary file (${formatBytes(fileA.size)}). Verified by identical checksum; content is binary and could not be compared as text. ${nameReason}`;
-
         exactResolvedIds.add(decision.keeper.id);
         exactResolvedIds.add(decision.olderOrDuplicate.id);
 
-        actionableMatches.push({
-          id: `exact-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
-          type: 'exact',
-          confidence: 1.0,
-          reason: detailedReason,
-          signalUsed: decision.signalUsed,
-          comparisonMethod,
-          originalFile: decision.keeper,
-          targetFile: decision.olderOrDuplicate,
-          similarityScore: 1.0,
-          isUncertain: false,
-        });
+        if (isBothExtracted || isBothDocs) {
+          actionableMatches.push({
+            id: `exact-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
+            type: 'exact',
+            classification: 'content-exact',
+            confidence: 1.0,
+            reason: `Exact duplicate verified by identical text content. ${nameReason}`,
+            signalUsed: decision.signalUsed,
+            comparisonMethod: 'text_similarity',
+            originalFile: decision.keeper,
+            targetFile: decision.olderOrDuplicate,
+            similarityScore: 1.0,
+            isUncertain: false,
+            requiresManualReview: false,
+            deletionEligible: true,
+            contentVerified: true,
+            hasSignificantDivergence: false,
+          });
+        } else if (fileA.contentHash && fileB.contentHash && fileA.contentHash === fileB.contentHash) {
+          actionableMatches.push({
+            id: `exact-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
+            type: 'exact',
+            classification: 'byte-exact',
+            confidence: 1.0,
+            reason: `Exact byte-identical binary file (${formatBytes(fileA.size)}). Verified by matching SHA-256 checksum. ${nameReason}`,
+            signalUsed: decision.signalUsed,
+            comparisonMethod: 'binary_checksum_match',
+            originalFile: decision.keeper,
+            targetFile: decision.olderOrDuplicate,
+            similarityScore: 1.0,
+            isUncertain: false,
+            requiresManualReview: false,
+            deletionEligible: true,
+            contentVerified: true,
+            hasSignificantDivergence: false,
+          });
+        } else {
+          // Conservative handling: unverified MD5 metadata match
+          uncertainMatches.push({
+            id: `probable-hash-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
+            type: 'probable-candidate',
+            classification: 'probable-candidate',
+            confidence: 0.70,
+            reason: `Probable duplicate: matching MD5 checksum from metadata (${formatBytes(fileA.size)}), but raw bytes were not directly verified. ${nameReason}`,
+            signalUsed: decision.signalUsed,
+            comparisonMethod: 'binary_checksum_match',
+            originalFile: decision.keeper,
+            targetFile: decision.olderOrDuplicate,
+            similarityScore: 1.0,
+            isUncertain: true,
+            uncertaintyReason: 'Matching MD5 checksum from metadata, but raw binary bytes were not verified. Manual review required.',
+            requiresManualReview: true,
+            deletionEligible: false,
+            contentVerified: false,
+            hasSignificantDivergence: true,
+          });
+        }
       }
     }
   };
@@ -728,9 +772,9 @@ export function analyzeDuplicates(
   }
 
   // 1.5. Near-Identical Filename + Exact File Size Match (when content is unavailable)
-  // Per specification: "If filenames are identical or near-identical (e.g. differ only by '(1)', 'copy',
-  // or a numeric suffix) AND file size matches exactly, this can still be flagged as a likely exact duplicate —
-  // but based on file size + name match, not fabricated content similarity, and the reason must say so explicitly"
+  // CONSERVATIVE SAFETY: Filename similarity and size match is merely a heuristic.
+  // It is classified strictly as a 'probable-candidate' and routed to uncertainMatches,
+  // NEVER to actionable/deletion-eligible matches.
   for (let i = 0; i < sortedFiles.length; i++) {
     const fileA = sortedFiles[i];
     if (exactResolvedIds.has(fileA.id)) continue;
@@ -752,23 +796,29 @@ export function analyzeDuplicates(
         const isFileACopy = hasCopySuffix(fileA.name);
         const isFileBCopy = hasCopySuffix(fileB.name);
         const nameReason = isFileACopy !== isFileBCopy
-          ? `"${decision.keeper.name}" is retained as original, while copy "${decision.olderOrDuplicate.name}" has a copy suffix.`
+          ? `"${decision.keeper.name}" has cleaner naming than copy "${decision.olderOrDuplicate.name}".`
           : `Both files share identical size (${formatBytes(fileA.size)}).`;
 
         exactResolvedIds.add(decision.keeper.id);
         exactResolvedIds.add(decision.olderOrDuplicate.id);
 
-        actionableMatches.push({
-          id: `size-match-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
-          type: 'exact',
-          confidence: 0.90,
-          reason: `Matched by identical file size (${formatBytes(fileA.size)}) and near-identical filename — content could not be read for verification. ${nameReason}`,
+        uncertainMatches.push({
+          id: `probable-size-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
+          type: 'probable-candidate',
+          classification: 'probable-candidate',
+          confidence: 0.50,
+          reason: `Probable candidate: matched only by similar filename and identical file size (${formatBytes(fileA.size)}). Content could not be read for verification. ${nameReason}`,
           signalUsed: 'size_and_name',
           comparisonMethod: 'size_and_name_match',
           originalFile: decision.keeper,
           targetFile: decision.olderOrDuplicate,
-          similarityScore: 1.0,
-          isUncertain: false,
+          similarityScore: 0.50,
+          isUncertain: true,
+          uncertaintyReason: 'Matched by filename similarity and file size only; content is unreadable and unverified.',
+          requiresManualReview: true,
+          deletionEligible: false,
+          contentVerified: false,
+          hasSignificantDivergence: true,
         });
         break;
       }
@@ -808,7 +858,8 @@ export function analyzeDuplicates(
             // Flag as "Uncertain — Content Not Readable" and require manual review. Never guess.
             const unreadableMatch: DuplicateMatch = {
               id: `uncertain-unreadable-${fileA.id}-${fileB.id}`,
-              type: 'near-duplicate',
+              type: 'unreadable',
+              classification: 'unreadable',
               confidence: 0.5,
               reason: `Uncertain — Content Not Readable: Content could not be extracted for verification between "${fileA.name}" and "${fileB.name}". Left safely in place for manual review.`,
               signalUsed: 'none',
@@ -819,8 +870,10 @@ export function analyzeDuplicates(
               isUncertain: true,
               hasSignificantDivergence: true,
               uncertaintyReason: `Content is unavailable or not extractable (e.g. scanned PDF, image, archive, or unreadable format). Safety rules prohibit auto-resolving without verified readable content.`,
+              requiresManualReview: true,
+              deletionEligible: false,
+              contentVerified: false,
             };
-            actionableMatches.push(unreadableMatch);
             uncertainMatches.push(unreadableMatch);
             pass2ResolvedIds.add(fileA.id);
             pass2ResolvedIds.add(fileB.id);
@@ -867,6 +920,7 @@ export function analyzeDuplicates(
           const uncertainMatch: DuplicateMatch = {
             id: `uncertain-version-${fileA.id}-${fileB.id}`,
             type: 'near-duplicate',
+            classification: 'near-duplicate',
             confidence: 0.5,
             reason: textComparedReason,
             signalUsed: decision.signalUsed,
@@ -877,8 +931,10 @@ export function analyzeDuplicates(
             isUncertain: true,
             hasSignificantDivergence: true,
             uncertaintyReason: decision.uncertaintyReason,
+            requiresManualReview: true,
+            deletionEligible: false,
+            contentVerified: true,
           };
-          actionableMatches.push(uncertainMatch);
           uncertainMatches.push(uncertainMatch);
           pass2ResolvedIds.add(fileA.id);
           pass2ResolvedIds.add(fileB.id);
@@ -886,18 +942,59 @@ export function analyzeDuplicates(
         } else {
           pass2ResolvedIds.add(decision.keeper.id);
           pass2ResolvedIds.add(decision.olderOrDuplicate.id);
-          actionableMatches.push({
-            id: `version-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
-            type: 'near-duplicate',
-            confidence: decision.signalUsed === 'content_statement' ? 0.98 : Math.min(0.95, 0.7 + contentSim * 0.25),
-            reason: textComparedReason,
-            signalUsed: decision.signalUsed,
-            comparisonMethod: 'text_similarity',
-            originalFile: decision.keeper,
-            targetFile: decision.olderOrDuplicate,
-            similarityScore: contentSim,
-            isUncertain: false,
-          });
+
+          const divergence = detectContentDivergence(decision.olderOrDuplicate, decision.keeper, contentSim);
+          const isProtectedByContentSignal = decision.signalUsed === 'content_statement' && contentSim >= 0.50;
+          const hasSignificantDivergence = isProtectedByContentSignal ? false : divergence.hasSignificantDivergence;
+
+          if (hasSignificantDivergence || contentSim < 0.75) {
+            // Divergent or borderline drafts -> require manual review
+            uncertainMatches.push({
+              id: `divergent-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
+              type: 'near-duplicate',
+              classification: 'near-duplicate',
+              confidence: isProtectedByContentSignal ? 0.90 : Math.min(0.85, 0.6 + contentSim * 0.25),
+              reason: textComparedReason,
+              signalUsed: decision.signalUsed,
+              comparisonMethod: 'text_similarity',
+              originalFile: decision.keeper,
+              targetFile: decision.olderOrDuplicate,
+              similarityScore: contentSim,
+              isUncertain: true,
+              hasSignificantDivergence: true,
+              uncertaintyReason: hasSignificantDivergence
+                ? divergence.summaryMessage || 'Significant content divergence detected between drafts.'
+                : 'Similarity below conservative threshold (75%). Human review required.',
+              requiresManualReview: true,
+              deletionEligible: false,
+              contentVerified: true,
+              divergenceInfo: divergence,
+            });
+          } else {
+            // Confident linear draft
+            actionableMatches.push({
+              id: `version-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
+              type: 'near-duplicate',
+              classification: 'near-duplicate',
+              confidence: decision.signalUsed === 'content_statement' ? 0.98 : Math.min(0.95, 0.7 + contentSim * 0.25),
+              reason: textComparedReason,
+              signalUsed: decision.signalUsed,
+              comparisonMethod: 'text_similarity',
+              originalFile: decision.keeper,
+              targetFile: decision.olderOrDuplicate,
+              similarityScore: contentSim,
+              isUncertain: false,
+              hasSignificantDivergence: false,
+              requiresManualReview: false,
+              deletionEligible: true,
+              contentVerified: true,
+              divergenceInfo: {
+                ...divergence,
+                hasSignificantDivergence: false,
+                warningLevel: 'none',
+              },
+            });
+          }
           break;
         }
       }
@@ -905,19 +1002,16 @@ export function analyzeDuplicates(
   }
 
   // Unique files: all files that were not trashed or targeted as older drafts
-  // (Note: 00_README.txt and protected key files are fully excluded and must not appear in uniqueFiles or reports)
   const trashedTargetIds = new Set(actionableMatches.map((m) => m.targetFile.id));
   const uniqueFiles = sortedFiles.filter((f) => !trashedTargetIds.has(f.id));
 
-  // Enrich each match with content divergence analysis
+  // Enrich matches with content divergence analysis while strictly preserving safety flags
   const enrichWithDivergence = (m: DuplicateMatch): DuplicateMatch => {
-    const divergence = detectContentDivergence(m.targetFile, m.originalFile, m.similarityScore);
+    if (m.divergenceInfo) {
+      return m;
+    }
 
-    // CRITICAL SPECIFICATION REQUIREMENTS:
-    // 1. Exact duplicates have identical content and zero divergence.
-    // 2. Content-signal priority (words like "draft," "final," "supersedes" overriding timestamp)
-    //    must still resolve confidently when a document explicitly states it supersedes another,
-    //    provided the 50% content gate is satisfied.
+    const divergence = detectContentDivergence(m.targetFile, m.originalFile, m.similarityScore);
     const isProtectedByContentSignalOrExact =
       m.type === 'exact' || (m.signalUsed === 'content_statement' && m.similarityScore >= 0.50);
     const hasSignificantDivergence = isProtectedByContentSignalOrExact
@@ -942,6 +1036,8 @@ export function analyzeDuplicates(
     return {
       ...m,
       hasSignificantDivergence,
+      requiresManualReview: m.requiresManualReview ?? (m.isUncertain || hasSignificantDivergence),
+      deletionEligible: m.deletionEligible !== undefined ? m.deletionEligible : (!m.isUncertain && !hasSignificantDivergence),
       divergenceInfo: isProtectedByContentSignalOrExact
         ? {
             ...divergence,

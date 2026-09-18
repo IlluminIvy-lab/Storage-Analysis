@@ -1,5 +1,6 @@
 import { DriveFileItem, DriveFolderItem, ContentStatus } from '../types';
 import { extractTextFromPdf } from './pdfTextExtractor';
+import { isProtectedFile } from './cleanupActionGate';
 
 export const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 export const EMPTY_MD5 = 'd41d8cd98f00b204e9800998ecf8427e';
@@ -447,8 +448,13 @@ export function parseDriveError(status: number, rawText: string, fileId?: string
  */
 export async function moveFileToTrash(
   fileId: string,
-  accessToken: string
+  accessToken: string,
+  fileName?: string
 ): Promise<boolean> {
+  if (fileName && isProtectedFile(fileName)) {
+    throw new Error(`Safety Protection: File "${fileName}" is a protected key file and cannot be moved to trash.`);
+  }
+
   const url = `${DRIVE_API_BASE}/files/${fileId}`;
   try {
     const res = await driveFetch(url, {
