@@ -47,10 +47,23 @@ import {
   DriveFolderItem,
   ScanType,
   FileTypeFilter,
+  AutoSelectPreferences,
 } from './types';
 import { computeScanMetrics } from './lib/formatters';
 import { isFileMatchingFilter } from './lib/scanFilterUtils';
-import { exportReportToCsv } from './lib/exportCsv';
+import {
+  exportReport,
+  exportReportToCsv,
+  exportReportToMarkdown,
+  exportReportToText,
+  ReportExportFormat,
+} from './lib/exportReport';
+import {
+  getSavedAutoSelectPreferences,
+  saveAutoSelectPreferences,
+  evaluateAutoSelectMatchIds,
+  realignMatchWithPreferences,
+} from './lib/autoSelectUtils';
 import { Navbar } from './components/Navbar';
 import { AuthScreen } from './components/AuthScreen';
 import { ScanProgress } from './components/ScanProgress';
@@ -69,6 +82,8 @@ import { ScanConfigurationCard } from './components/ScanConfigurationCard';
 import { LeftDrawerMenu } from './components/LeftDrawerMenu';
 import { QuickViewModal } from './components/QuickViewModal';
 import { ScanSummaryModal } from './components/ScanSummaryModal';
+import { AdvancedAutoSelectModal } from './components/AdvancedAutoSelectModal';
+import { DownloadReportModal } from './components/DownloadReportModal';
 
 export default function App() {
   // Restore user & Drive token from persistent session on mount
@@ -129,6 +144,46 @@ export default function App() {
   const [keptMatchIds, setKeptMatchIds] = useState<string[]>([]);
   const [smartRenameTargetFile, setSmartRenameTargetFile] = useState<DriveFileItem | null>(null);
   const [smartFolderTargetFile, setSmartFolderTargetFile] = useState<DriveFileItem | null>(null);
+
+  // Advanced Auto-Select Preferences & Modal State
+  const [isAutoSelectModalOpen, setIsAutoSelectModalOpen] = useState<boolean>(false);
+  const [autoSelectPreferences, setAutoSelectPreferences] = useState<AutoSelectPreferences>(() =>
+    getSavedAutoSelectPreferences()
+  );
+  const [downloadModalReport, setDownloadModalReport] = useState<CleanupReport | null>(null);
+
+  const handleSaveAutoSelectPreferences = (newPrefs: AutoSelectPreferences) => {
+    setAutoSelectPreferences(newPrefs);
+    saveAutoSelectPreferences(newPrefs);
+
+    // If matches already exist in current scan session, realign keeper vs duplicate based on new preferences:
+    if (actionableMatches.length > 0) {
+      const realigned = actionableMatches.map((m) => realignMatchWithPreferences(m, newPrefs));
+      setActionableMatches(realigned);
+      if (newPrefs.enabled && newPrefs.autoApplyOnScan) {
+        const newSelected = evaluateAutoSelectMatchIds(realigned, newPrefs);
+        setSelectedMatchIds(newSelected);
+      } else if (!newPrefs.enabled) {
+        // When Auto-Select is toggled OFF, clear automatic selection for manual review
+        setSelectedMatchIds([]);
+      }
+    }
+  };
+
+  const handleToggleAutoSelect = (enabled?: boolean) => {
+    const nextEnabled = enabled !== undefined ? enabled : !autoSelectPreferences.enabled;
+    const updated: AutoSelectPreferences = {
+      ...autoSelectPreferences,
+      enabled: nextEnabled,
+    };
+    handleSaveAutoSelectPreferences(updated);
+  };
+
+  const handleApplyAutoSelectRules = () => {
+    // Force evaluation if user explicitly taps the Auto-Select button
+    const selectedIds = evaluateAutoSelectMatchIds(actionableMatches, autoSelectPreferences, true);
+    setSelectedMatchIds(selectedIds);
+  };
 
   // Activity Tracker & 7-10s Undo Action
   const [recentActions, setRecentActions] = useState<HistoryAction[]>([]);
@@ -389,10 +444,10 @@ export default function App() {
 
       if (isCancelledRef.current) return;
 
-      // Apply File Type Filter
-      const rawFiles = enumeratedFiles.filter((file) =>
-        isFileMatchingFilter(file, fileTypeFilter, customExtensions)
-      );
+      // Apply File Type Filter and exclude 00_README.txt / protected key files entirely
+      const rawFiles = enumeratedFiles
+        .filter((file) => isFileMatchingFilter(file, fileTypeFilter, customExtensions))
+        .filter((file) => !/^(?:00_)?readme\.txt$/i.test(file.name?.trim() || ''));
 
       if (rawFiles.length === 0) {
         const duration = Date.now() - startTime;
@@ -434,15 +489,21 @@ export default function App() {
         setCurrentActionText(`Reading content of "${file.name}" (${i + 1} of ${rawFiles.length})...`);
         
         try {
-          const { text, hash } = await readFileContent(file, accessToken);
+          const { text, hash, contentStatus, extractedWordCount, sizeBytes } = await readFileContent(file, accessToken);
           filesWithContent.push({
             ...file,
             content: text,
             contentHash: hash,
+            contentStatus,
+            extractedWordCount,
+            size: sizeBytes !== undefined ? sizeBytes : file.size,
           });
         } catch (err) {
           console.warn(`Could not read file ${file.name}:`, err);
-          filesWithContent.push(file);
+          filesWithContent.push({
+            ...file,
+            contentStatus: 'unavailable',
+          });
         }
 
         setProcessedCount(i + 1);
@@ -466,6 +527,7 @@ export default function App() {
 
       const analysis = analyzeDuplicates(filesWithContent, {
         exactOnly: scanType === 'exact_only',
+        preferences: autoSelectPreferences,
       });
 
       if (isCancelledRef.current) {
@@ -491,12 +553,15 @@ export default function App() {
       setScanMetrics(computed);
 
       // SMART SCAN (WITH REVIEW) WORKFLOW:
-      // Pre-select SAFE files (exact duplicates and linear drafts without divergence)
-      // Divergent files (with unique edits) are left unselected by default for safety!
-      const safeIds = analysis.actionableMatches
-        .filter((m) => !m.hasSignificantDivergence)
-        .map((m) => m.id);
-      setSelectedMatchIds(safeIds);
+      // Pre-select according to user-defined Auto-Select preferences (or empty if disabled):
+      const initialSelectedIds = autoSelectPreferences.enabled
+        ? autoSelectPreferences.autoApplyOnScan
+          ? evaluateAutoSelectMatchIds(analysis.actionableMatches, autoSelectPreferences)
+          : analysis.actionableMatches
+              .filter((m) => !m.hasSignificantDivergence)
+              .map((m) => m.id)
+        : [];
+      setSelectedMatchIds(initialSelectedIds);
       setScanStage('smart_review');
       setIsScanSummaryOpen(true);
       setCurrentActionText(
@@ -509,34 +574,61 @@ export default function App() {
     }
   };
 
-  const handleExportProposedCsv = () => {
-    const proposedReport: CleanupReport = {
+  const createProposedReport = (): CleanupReport => {
+    const isProtectedKeyFile = (fileName?: string) =>
+      /^(?:00_)?readme\.txt$/i.test(fileName?.trim() || '');
+
+    const validActionable = actionableMatches.filter(
+      (m) => !isProtectedKeyFile(m.targetFile?.name) && !isProtectedKeyFile(m.originalFile?.name)
+    );
+    const validUnique = uniqueFiles.filter((f) => !isProtectedKeyFile(f?.name));
+    const validUncertain = uncertainMatches.filter(
+      (u) => !isProtectedKeyFile(u.fileB?.name) && !isProtectedKeyFile(u.fileA?.name)
+    );
+
+    return {
       timestamp: new Date().toISOString(),
       folderName,
-      totalFilesReviewed: scannedFiles.length,
-      totalExactDuplicates: actionableMatches.filter((m) => m.type === 'exact').length,
-      totalVersionDrafts: actionableMatches.filter((m) => m.type !== 'exact').length,
-      totalTrashed: actionableMatches.length,
-      totalUniqueKept: uniqueFiles.length,
+      isProposedReport: true,
+      totalFilesReviewed: scannedFiles.filter((f) => !isProtectedKeyFile(f.name)).length,
+      totalExactDuplicates: validActionable.filter((m) => m.type === 'exact').length,
+      totalVersionDrafts: validActionable.filter((m) => m.type !== 'exact').length,
+      totalTrashed: 0,
+      totalUniqueKept: validUnique.length,
       scanDurationMs,
       metrics: scanMetrics || undefined,
-      trashedFiles: actionableMatches.map((m) => ({
+      trashedFiles: validActionable.map((m) => ({
         trashedFile: m.targetFile,
         keptOriginalFile: m.originalFile,
         type: m.type,
         reason: m.reason,
         similarity: m.similarityScore,
+        comparisonMethod: m.comparisonMethod,
         trashedSuccess: false,
+        isProposed: true,
       })),
-      uncertainFiles: uncertainMatches.map((m) => ({
+      uncertainFiles: validUncertain.map((m) => ({
         fileA: m.originalFile,
         fileB: m.targetFile,
         reason: m.reason,
         similarity: m.similarityScore,
+        comparisonMethod: m.comparisonMethod,
       })),
-      keptFiles: uniqueFiles,
+      keptFiles: validUnique,
     };
-    exportReportToCsv(proposedReport);
+  };
+
+  const handleExportProposedReport = (format: ReportExportFormat = 'markdown') => {
+    const proposed = createProposedReport();
+    exportReport(proposed, format);
+  };
+
+  const handleOpenProposedReportModal = () => {
+    setDownloadModalReport(createProposedReport());
+  };
+
+  const handleExportProposedCsv = () => {
+    handleExportProposedReport('csv');
   };
 
   /**
@@ -582,6 +674,7 @@ export default function App() {
           reason: match.reason,
           signalUsed: match.signalUsed,
           similarity: match.similarityScore,
+          comparisonMethod: match.comparisonMethod,
           trashedSuccess: true,
         });
 
@@ -589,6 +682,9 @@ export default function App() {
         else draftCount++;
       } catch (err: any) {
         console.error(`Failed to trash file ${match.targetFile.name}:`, err);
+        const specificError =
+          err?.message ||
+          (typeof err === 'string' ? err : 'Permission denied or file unavailable in Drive');
         trashedResults.push({
           trashedFile: match.targetFile,
           keptOriginalFile: match.originalFile,
@@ -596,37 +692,54 @@ export default function App() {
           reason: match.reason,
           signalUsed: match.signalUsed,
           similarity: match.similarityScore,
+          comparisonMethod: match.comparisonMethod,
           trashedSuccess: false,
-          error: err.message,
+          error: specificError,
         });
       }
 
       setProcessedCount(i + 1);
     }
 
-    // Generate Final Cleanup Report
+    // Generate Final Cleanup Report with guaranteed non-contradictory single status per file
     const successfulTrashed = trashedResults.filter((r) => r.trashedSuccess);
     const newTrashedIds = successfulTrashed.map((r) => r.trashedFile.id);
     setSessionTrashedFileIds((prev) => Array.from(new Set([...prev, ...newTrashedIds])));
 
-    const generatedReport: CleanupReport = {
-      timestamp: new Date().toISOString(),
-      folderName,
-      totalFilesReviewed: scannedFiles.length,
-      totalExactDuplicates: exactCount,
-      totalVersionDrafts: draftCount,
-      totalTrashed: successfulTrashed.length,
-      totalUniqueKept: uniqueFiles.length,
-      scanDurationMs,
-      metrics: scanMetrics || undefined,
-      trashedFiles: trashedResults,
-      uncertainFiles: uncertainMatches.map((m) => ({
+    const isProtectedKeyFile = (fileName?: string) =>
+      /^(?:00_)?readme\.txt$/i.test(fileName?.trim() || '');
+
+    // Eliminate duplicate entries across categories:
+    // Any target file attempted for trash must not appear in uncertain or kept
+    const attemptedTargetIds = new Set(trashedResults.map((r) => r.trashedFile.id));
+
+    const deduplicatedUncertain = uncertainMatches
+      .filter((m) => !attemptedTargetIds.has(m.targetFile.id) && !isProtectedKeyFile(m.targetFile?.name))
+      .map((m) => ({
         fileA: m.originalFile,
         fileB: m.targetFile,
         reason: m.reason,
         similarity: m.similarityScore,
-      })),
-      keptFiles: uniqueFiles,
+        comparisonMethod: m.comparisonMethod,
+      }));
+
+    const deduplicatedKept = uniqueFiles.filter(
+      (f) => !attemptedTargetIds.has(f.id) && !isProtectedKeyFile(f.name)
+    );
+
+    const generatedReport: CleanupReport = {
+      timestamp: new Date().toISOString(),
+      folderName,
+      totalFilesReviewed: scannedFiles.filter((f) => !isProtectedKeyFile(f.name)).length,
+      totalExactDuplicates: exactCount,
+      totalVersionDrafts: draftCount,
+      totalTrashed: successfulTrashed.length,
+      totalUniqueKept: deduplicatedKept.length,
+      scanDurationMs,
+      metrics: scanMetrics || undefined,
+      trashedFiles: trashedResults.filter((r) => !isProtectedKeyFile(r.trashedFile?.name)),
+      uncertainFiles: deduplicatedUncertain,
+      keptFiles: deduplicatedKept,
     };
 
     setReport(generatedReport);
@@ -849,24 +962,42 @@ export default function App() {
   };
 
   const handleFinalizeKeepAll = () => {
-    const generatedReport: CleanupReport = {
-      timestamp: new Date().toISOString(),
-      folderName,
-      totalFilesReviewed: scannedFiles.length,
-      totalExactDuplicates: actionableMatches.filter((m) => m.type === 'exact').length,
-      totalVersionDrafts: actionableMatches.filter((m) => m.type !== 'exact').length,
-      totalTrashed: 0,
-      totalUniqueKept: uniqueFiles.length + actionableMatches.length,
-      scanDurationMs,
-      metrics: scanMetrics || undefined,
-      trashedFiles: [],
-      uncertainFiles: uncertainMatches.map((m) => ({
+    const isProtectedKeyFile = (fileName?: string) =>
+      /^(?:00_)?readme\.txt$/i.test(fileName?.trim() || '');
+
+    const validUncertain = uncertainMatches
+      .filter((u) => !isProtectedKeyFile(u.fileB?.name) && !isProtectedKeyFile(u.fileA?.name))
+      .map((m) => ({
         fileA: m.originalFile,
         fileB: m.targetFile,
         reason: m.reason,
         similarity: m.similarityScore,
-      })),
-      keptFiles: [...uniqueFiles, ...actionableMatches.map((m) => m.targetFile)],
+      }));
+
+    // Deduplicate kept files
+    const keptMap = new Map<string, DriveFileItem>();
+    for (const file of uniqueFiles) {
+      if (!isProtectedKeyFile(file.name)) keptMap.set(file.id, file);
+    }
+    for (const match of actionableMatches) {
+      if (!isProtectedKeyFile(match.targetFile.name)) keptMap.set(match.targetFile.id, match.targetFile);
+      if (!isProtectedKeyFile(match.originalFile.name)) keptMap.set(match.originalFile.id, match.originalFile);
+    }
+    const finalKept = Array.from(keptMap.values());
+
+    const generatedReport: CleanupReport = {
+      timestamp: new Date().toISOString(),
+      folderName,
+      totalFilesReviewed: scannedFiles.filter((f) => !isProtectedKeyFile(f.name)).length,
+      totalExactDuplicates: actionableMatches.filter((m) => m.type === 'exact').length,
+      totalVersionDrafts: actionableMatches.filter((m) => m.type !== 'exact').length,
+      totalTrashed: 0,
+      totalUniqueKept: finalKept.length,
+      scanDurationMs,
+      metrics: scanMetrics || undefined,
+      trashedFiles: [],
+      uncertainFiles: validUncertain,
+      keptFiles: finalKept,
     };
 
     setReport(generatedReport);
@@ -1028,6 +1159,9 @@ export default function App() {
                 onCustomExtensionsChange={setCustomExtensions}
                 onStartScan={startCleanupScan}
                 isLoading={false}
+                autoSelectPreferences={autoSelectPreferences}
+                onOpenAutoSelectModal={() => setIsAutoSelectModalOpen(true)}
+                onToggleAutoSelect={handleToggleAutoSelect}
               />
             ) : (
               <div className="bg-[#181818] border border-[#2c2c2c] rounded-3xl p-5 sm:p-6 shadow-xl space-y-3">
@@ -1120,6 +1254,8 @@ export default function App() {
                 keptMatchIds={keptMatchIds}
                 onCancelWorkflow={handleStopWorkflow}
                 onOpenSummary={() => setIsScanSummaryOpen(true)}
+                onExportReport={handleExportProposedReport}
+                onOpenExportModal={handleOpenProposedReportModal}
                 onToggleSelectMatch={(id) => {
                   setSelectedMatchIds((prev) =>
                     prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
@@ -1144,6 +1280,10 @@ export default function App() {
                 }}
                 onProceedToDetailedResults={() => setScanStage('ready_for_review')}
                 onConfirmTrashApproved={() => setIsConfirmationOpen(true)}
+                autoSelectPreferences={autoSelectPreferences}
+                onOpenAutoSelectModal={() => setIsAutoSelectModalOpen(true)}
+                onApplyAutoSelectRules={handleApplyAutoSelectRules}
+                onToggleAutoSelect={handleToggleAutoSelect}
               />
             )}
 
@@ -1180,15 +1320,44 @@ export default function App() {
                       <Sparkles className="w-4 h-4" />
                       <span>Smart Review Tiers</span>
                     </button>
-                    <button
-                      id="export-proposed-csv-btn"
-                      onClick={handleExportProposedCsv}
-                      className="px-3.5 py-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[#F5E9DC] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer min-h-[44px]"
-                      title="Download proposed cleanup plan as CSV"
-                    >
-                      <Download className="w-4 h-4 text-[#C75B12]" />
-                      <span>Export CSV</span>
-                    </button>
+
+                    {/* Export Plan Report Trigger & Direct Format Buttons */}
+                    <div className="flex items-center gap-1 bg-[#141414] p-1 rounded-xl border border-[#2e2e2e]">
+                      <button
+                        id="export-proposed-modal-btn"
+                        onClick={handleOpenProposedReportModal}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#242424] hover:bg-[#303030] text-[#F5E9DC] text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer min-h-[36px]"
+                        title="Download proposed cleanup report in Markdown, Text, or CSV format"
+                      >
+                        <Download className="w-3.5 h-3.5 text-[#C75B12]" />
+                        <span>Export Plan</span>
+                      </button>
+                      <button
+                        id="export-proposed-md-btn"
+                        onClick={() => handleExportProposedReport('markdown')}
+                        className="px-2 py-1.5 rounded-lg hover:bg-[#242424] text-[#C75B12] hover:text-[#d66518] text-[11px] font-bold transition-colors cursor-pointer min-h-[36px]"
+                        title="Download as Markdown Document (.md)"
+                      >
+                        .MD
+                      </button>
+                      <button
+                        id="export-proposed-txt-btn"
+                        onClick={() => handleExportProposedReport('text')}
+                        className="px-2 py-1.5 rounded-lg hover:bg-[#242424] text-[#C9A86A] hover:text-[#e0bb77] text-[11px] font-bold transition-colors cursor-pointer min-h-[36px]"
+                        title="Download as Plain Text Document (.txt)"
+                      >
+                        .TXT
+                      </button>
+                      <button
+                        id="export-proposed-csv-btn"
+                        onClick={() => handleExportProposedReport('csv')}
+                        className="px-2 py-1.5 rounded-lg hover:bg-[#242424] text-emerald-400 hover:text-emerald-300 text-[11px] font-bold transition-colors cursor-pointer min-h-[36px]"
+                        title="Download as CSV Spreadsheet (.csv)"
+                      >
+                        .CSV
+                      </button>
+                    </div>
+
                     <button
                       onClick={() => startCleanupScan()}
                       className="px-3.5 py-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[#A0988E] hover:text-[#F5E9DC] text-xs font-medium transition-colors cursor-pointer min-h-[44px]"
@@ -1249,6 +1418,10 @@ export default function App() {
                   onBulkTrashMatches={handleBulkTrashMatches}
                   onBulkSmartRename={handleBulkSmartRename}
                   onBulkSmartFolder={handleBulkSmartFolder}
+                  autoSelectPreferences={autoSelectPreferences}
+                  onOpenAutoSelectModal={() => setIsAutoSelectModalOpen(true)}
+                  onApplyAutoSelectRules={handleApplyAutoSelectRules}
+                  onToggleAutoSelect={handleToggleAutoSelect}
                 />
               </div>
             )}
@@ -1328,7 +1501,7 @@ export default function App() {
           setIsScanSummaryOpen(false);
           setScanStage('smart_review');
         }}
-        onExportReport={handleExportProposedCsv}
+        onExportReport={handleExportProposedReport}
       />
 
       {/* Confirmation Modal (Mandatory for destructive trash operations) */}
@@ -1390,13 +1563,46 @@ export default function App() {
         selectedMatchesCount={selectedMatchIds.length}
         onSelectAllMatches={() => setSelectedMatchIds(actionableMatches.map((m) => m.id))}
         onDeselectAllMatches={() => setSelectedMatchIds([])}
-        onExportCsv={actionableMatches.length > 0 ? handleExportProposedCsv : undefined}
+        onExportReport={actionableMatches.length > 0 ? handleExportProposedReport : undefined}
+        onExportCsv={actionableMatches.length > 0 ? () => handleExportProposedReport('csv') : undefined}
         onNewScan={() => {
           setIsLeftDrawerOpen(false);
           setScanStage('idle');
           setReport(null);
         }}
+        autoSelectPreferences={autoSelectPreferences}
+        onOpenAutoSelectModal={() => setIsAutoSelectModalOpen(true)}
+        onToggleAutoSelect={handleToggleAutoSelect}
       />
+
+      {/* Advanced Auto-Select Preferences Modal */}
+      <AdvancedAutoSelectModal
+        isOpen={isAutoSelectModalOpen}
+        onClose={() => setIsAutoSelectModalOpen(false)}
+        preferences={autoSelectPreferences}
+        initialPreferences={autoSelectPreferences}
+        onSavePreferences={handleSaveAutoSelectPreferences}
+        currentMatches={actionableMatches}
+        candidateMatches={actionableMatches}
+        onApplyToCurrent={(newPrefs) => {
+          handleSaveAutoSelectPreferences(newPrefs);
+          if (actionableMatches.length > 0) {
+            const realigned = actionableMatches.map((m) => realignMatchWithPreferences(m, newPrefs));
+            setActionableMatches(realigned);
+            const selected = evaluateAutoSelectMatchIds(realigned, newPrefs);
+            setSelectedMatchIds(selected);
+          }
+        }}
+      />
+
+      {/* Download Report Modal (Markdown / Text / CSV with preview & copy) */}
+      {downloadModalReport && (
+        <DownloadReportModal
+          isOpen={downloadModalReport !== null}
+          onClose={() => setDownloadModalReport(null)}
+          report={downloadModalReport}
+        />
+      )}
     </div>
   );
 }

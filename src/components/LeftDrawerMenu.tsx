@@ -2,6 +2,7 @@ import React from 'react';
 import {
   X,
   Sliders,
+  SlidersHorizontal,
   FolderLock,
   ShieldCheck,
   BrainCircuit,
@@ -21,8 +22,13 @@ import {
   List,
   Filter,
   ArrowRight,
+  FileCode,
+  FileText,
+  FolderDown,
 } from 'lucide-react';
-import { DriveFolderItem, DuplicateMatch, CleanupReport, ViewMode } from '../types';
+import { DriveFolderItem, DuplicateMatch, CleanupReport, ViewMode, AutoSelectPreferences } from '../types';
+import { getKeeperPreferenceSummary } from '../lib/autoSelectUtils';
+import { ReportExportFormat } from '../lib/exportReport';
 
 interface LeftDrawerMenuProps {
   isOpen: boolean;
@@ -45,7 +51,12 @@ interface LeftDrawerMenuProps {
   onSelectAllMatches?: () => void;
   onDeselectAllMatches?: () => void;
   onExportCsv?: () => void;
+  onExportReport?: (format: ReportExportFormat) => void;
   onNewScan?: () => void;
+  // Automation & Rules
+  autoSelectPreferences?: AutoSelectPreferences;
+  onOpenAutoSelectModal?: () => void;
+  onToggleAutoSelect?: (enabled?: boolean) => void;
 }
 
 export const LeftDrawerMenu: React.FC<LeftDrawerMenuProps> = ({
@@ -66,7 +77,11 @@ export const LeftDrawerMenu: React.FC<LeftDrawerMenuProps> = ({
   onSelectAllMatches,
   onDeselectAllMatches,
   onExportCsv,
+  onExportReport,
   onNewScan,
+  autoSelectPreferences,
+  onOpenAutoSelectModal,
+  onToggleAutoSelect,
 }) => {
   if (!isOpen) return null;
 
@@ -236,18 +251,57 @@ export const LeftDrawerMenu: React.FC<LeftDrawerMenuProps> = ({
                   )}
                 </div>
 
-                {onExportCsv && (
-                  <button
-                    id="drawer-export-csv-btn"
-                    onClick={() => {
-                      onExportCsv();
-                      onClose();
-                    }}
-                    className="w-full py-2 px-3 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-xs font-semibold text-[#F5E9DC] flex items-center justify-center gap-2 transition-colors cursor-pointer min-h-[40px]"
-                  >
-                    <FileSpreadsheet className="w-3.5 h-3.5 text-[#C75B12]" />
-                    <span>Export Plan as CSV</span>
-                  </button>
+                {(onExportReport || onExportCsv) && (
+                  <div className="space-y-1.5 pt-1">
+                    <div className="text-[11px] font-semibold text-[#A0988E] flex items-center gap-1.5 px-0.5">
+                      <FolderDown className="w-3.5 h-3.5 text-[#C75B12]" />
+                      <span>Export Scan Plan Report</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <button
+                        id="drawer-export-md-btn"
+                        type="button"
+                        onClick={() => {
+                          if (onExportReport) onExportReport('markdown');
+                          else if (onExportCsv) onExportCsv();
+                          onClose();
+                        }}
+                        className="py-2 px-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[11px] font-semibold text-[#F5E9DC] flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer min-h-[44px]"
+                        title="Download Markdown Document (.md)"
+                      >
+                        <FileCode className="w-3.5 h-3.5 text-[#C75B12]" />
+                        <span>.MD</span>
+                      </button>
+                      <button
+                        id="drawer-export-txt-btn"
+                        type="button"
+                        onClick={() => {
+                          if (onExportReport) onExportReport('text');
+                          else if (onExportCsv) onExportCsv();
+                          onClose();
+                        }}
+                        className="py-2 px-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[11px] font-semibold text-[#F5E9DC] flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer min-h-[44px]"
+                        title="Download Plain Text Document (.txt)"
+                      >
+                        <FileText className="w-3.5 h-3.5 text-[#C9A86A]" />
+                        <span>.TXT</span>
+                      </button>
+                      <button
+                        id="drawer-export-csv-btn"
+                        type="button"
+                        onClick={() => {
+                          if (onExportReport) onExportReport('csv');
+                          else if (onExportCsv) onExportCsv();
+                          onClose();
+                        }}
+                        className="py-2 px-2 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[11px] font-semibold text-[#F5E9DC] flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer min-h-[44px]"
+                        title="Download CSV Spreadsheet (.csv)"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>.CSV</span>
+                      </button>
+                    </div>
+                  </div>
                 )}
 
                 {onNewScan && (
@@ -266,6 +320,73 @@ export const LeftDrawerMenu: React.FC<LeftDrawerMenuProps> = ({
               </div>
             </div>
           )}
+
+          {/* SECTION: AUTOMATION & ADVANCED AUTO-SELECT */}
+          <div className="space-y-2.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-[#C9A86A] block">
+              Automation &amp; Auto-Select
+            </span>
+
+            <div className="p-3.5 rounded-2xl bg-[#1a1a1a] border border-[#292929] space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-semibold text-xs text-[#F5E9DC] block">
+                      Auto-Select
+                    </span>
+                    <span
+                      className={`text-[9px] font-bold px-1.5 py-0.2 rounded uppercase tracking-wider ${
+                        autoSelectPreferences?.enabled
+                          ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                          : 'bg-[#262626] text-[#888888] border border-[#333333]'
+                      }`}
+                    >
+                      {autoSelectPreferences?.enabled ? 'ON' : 'OFF'}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-[#A0988E] block mt-0.5 leading-relaxed">
+                    {autoSelectPreferences ? getKeeperPreferenceSummary(autoSelectPreferences) : 'Always prefer newer files'}
+                  </span>
+                </div>
+
+                {onToggleAutoSelect && autoSelectPreferences && (
+                  <button
+                    id="drawer-toggle-auto-select-btn"
+                    type="button"
+                    role="switch"
+                    aria-checked={autoSelectPreferences.enabled}
+                    onClick={() => onToggleAutoSelect(!autoSelectPreferences.enabled)}
+                    className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none min-h-[44px] items-center px-0.5 ${
+                      autoSelectPreferences.enabled ? 'bg-[#C75B12]' : 'bg-[#333333]'
+                    }`}
+                    title={autoSelectPreferences.enabled ? 'Turn Auto-Select OFF' : 'Turn Auto-Select ON'}
+                  >
+                    <span className="sr-only">Toggle Auto-Select</span>
+                    <span
+                      aria-hidden="true"
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-[#F5E9DC] shadow ring-0 transition duration-200 ease-in-out ${
+                        autoSelectPreferences.enabled ? 'translate-x-5' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </button>
+                )}
+              </div>
+
+              {onOpenAutoSelectModal && (
+                <button
+                  id="drawer-open-auto-select-btn"
+                  onClick={() => {
+                    onOpenAutoSelectModal();
+                    onClose();
+                  }}
+                  className="w-full py-2 px-3 rounded-xl bg-[#222222] hover:bg-[#2a2a2a] border border-[#333333] text-[#F5E9DC]/80 hover:text-[#F5E9DC] text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer min-h-[40px]"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5 text-[#C9A86A]" />
+                  <span>Configure Rules &amp; Keeper Strategy</span>
+                </button>
+              )}
+            </div>
+          </div>
 
           {/* SECTION 3: DISPLAY & APPEARANCE OPTIONS */}
           <div className="space-y-2.5">

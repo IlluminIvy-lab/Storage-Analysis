@@ -22,9 +22,11 @@ import {
   RotateCcw,
   ShieldAlert,
   Eye,
+  SlidersHorizontal,
 } from 'lucide-react';
-import { DuplicateMatch, DriveFileItem, ViewMode } from '../types';
+import { DuplicateMatch, DriveFileItem, ViewMode, AutoSelectPreferences } from '../types';
 import { generateQuickSummary, suggestSmartFolder, suggestSmartRename } from '../lib/smartFileIntelligence';
+import { getKeeperPreferenceSummary } from '../lib/autoSelectUtils';
 
 export type ResultCategoryFilter = 'all' | 'exact' | 'near-duplicate' | 'divergent' | 'uncertain';
 export type SimilarityFilter = 'all' | 'high' | 'moderate' | 'low';
@@ -49,6 +51,10 @@ interface MatchesViewProps {
   onBulkTrashMatches?: (matches: DuplicateMatch[]) => void;
   onBulkSmartRename: (matches: DuplicateMatch[]) => void;
   onBulkSmartFolder: (matches: DuplicateMatch[]) => void;
+  autoSelectPreferences?: AutoSelectPreferences;
+  onOpenAutoSelectModal?: () => void;
+  onApplyAutoSelectRules?: () => void;
+  onToggleAutoSelect?: (enabled?: boolean) => void;
 }
 
 export const MatchesView: React.FC<MatchesViewProps> = ({
@@ -69,6 +75,10 @@ export const MatchesView: React.FC<MatchesViewProps> = ({
   onBulkTrashMatches,
   onBulkSmartRename,
   onBulkSmartFolder,
+  autoSelectPreferences,
+  onOpenAutoSelectModal,
+  onApplyAutoSelectRules,
+  onToggleAutoSelect,
 }) => {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
 
@@ -435,6 +445,57 @@ export const MatchesView: React.FC<MatchesViewProps> = ({
               <span>{allSelected ? 'Deselect All' : 'Select All Filtered'}</span>
             </button>
 
+            {/* Auto-Select according to user preferences */}
+            {onApplyAutoSelectRules && (
+              <button
+                id="btn-run-auto-select-rules"
+                type="button"
+                onClick={onApplyAutoSelectRules}
+                className="px-3 py-1 rounded-xl bg-[#C75B12]/15 hover:bg-[#C75B12]/25 border border-[#C75B12]/40 text-xs font-semibold text-[#C75B12] flex items-center gap-1.5 transition-colors cursor-pointer min-h-[34px]"
+                title="Apply persistent auto-select rules"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-[#C75B12]" />
+                <span>Auto-Select</span>
+              </button>
+            )}
+
+            {/* Quick Auto-Select ON/OFF toggle */}
+            {onToggleAutoSelect && autoSelectPreferences && (
+              <button
+                id="btn-matches-toggle-auto-select"
+                type="button"
+                onClick={() => onToggleAutoSelect(!autoSelectPreferences.enabled)}
+                className={`px-2.5 py-1 rounded-xl text-xs font-semibold border transition-colors flex items-center gap-1.5 min-h-[34px] cursor-pointer ${
+                  autoSelectPreferences.enabled
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25'
+                    : 'bg-[#222222] border-[#383838] text-[#888888] hover:text-[#F5E9DC]'
+                }`}
+                title={
+                  autoSelectPreferences.enabled
+                    ? 'Auto-Select is currently ON (click to turn OFF)'
+                    : 'Auto-Select is currently OFF (click to turn ON)'
+                }
+              >
+                <span className="text-[10px] uppercase font-bold tracking-wider">
+                  {autoSelectPreferences.enabled ? 'Auto: ON' : 'Auto: OFF'}
+                </span>
+              </button>
+            )}
+
+            {/* Open Auto-Select settings */}
+            {onOpenAutoSelectModal && (
+              <button
+                id="btn-open-auto-select-settings"
+                type="button"
+                onClick={onOpenAutoSelectModal}
+                className="px-2.5 py-1 rounded-xl bg-[#222222] hover:bg-[#2c2c2c] border border-[#333333] text-[#F5E9DC]/80 hover:text-[#F5E9DC] flex items-center gap-1.5 transition-colors cursor-pointer min-h-[34px]"
+                title={autoSelectPreferences ? getKeeperPreferenceSummary(autoSelectPreferences) : 'Configure Auto-Select rules'}
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-[#C9A86A]" />
+                <span className="text-[11px] text-[#C9A86A] font-medium">Rules</span>
+              </button>
+            )}
+
             <span className="text-xs text-[#888888]">
               Showing <strong className="text-[#F5E9DC]">{filteredMatches.length}</strong> of{' '}
               {allCandidateMatches.length} pairs
@@ -639,7 +700,13 @@ export const MatchesView: React.FC<MatchesViewProps> = ({
                         Keeping: &ldquo;{m.originalFile.name}&rdquo;
                       </span>
                       <span className="text-[10px] text-[#C9A86A] bg-[#1a1a1a] px-2 py-0.5 rounded-md font-mono border border-[#2a2a2a] shrink-0">
-                        {Math.round(m.similarityScore * 100)}% match
+                        {m.comparisonMethod === 'size_and_name_match'
+                          ? 'Size & Name Match'
+                          : m.comparisonMethod === 'binary_checksum_match'
+                          ? 'Byte Checksum Match'
+                          : m.comparisonMethod === 'none'
+                          ? 'Unreadable'
+                          : `${Math.round(m.similarityScore * 100)}% match`}
                       </span>
                     </div>
                     <p className="text-[#888888] line-clamp-2">{m.reason}</p>
@@ -773,7 +840,13 @@ export const MatchesView: React.FC<MatchesViewProps> = ({
                           </span>
                           <span>&bull;</span>
                           <span className="text-[#C9A86A] font-mono">
-                            {Math.round(m.similarityScore * 100)}% match
+                            {m.comparisonMethod === 'size_and_name_match'
+                              ? 'Size & Name Match'
+                              : m.comparisonMethod === 'binary_checksum_match'
+                              ? 'Byte Checksum Match'
+                              : m.comparisonMethod === 'none'
+                              ? 'Unreadable'
+                              : `${Math.round(m.similarityScore * 100)}% match`}
                           </span>
                         </div>
                       </div>

@@ -18,9 +18,10 @@ import {
   BrainCircuit,
   SlidersHorizontal,
 } from 'lucide-react';
-import { DriveFolderItem, ScanType, FileTypeFilter } from '../types';
+import { DriveFolderItem, ScanType, FileTypeFilter, AutoSelectPreferences } from '../types';
 import { listDriveFolders } from '../lib/driveApi';
 import { COMMON_EXTENSIONS } from '../lib/scanFilterUtils';
+import { getKeeperPreferenceSummary } from '../lib/autoSelectUtils';
 
 interface ScanConfigurationCardProps {
   token: string | null;
@@ -34,6 +35,9 @@ interface ScanConfigurationCardProps {
   onCustomExtensionsChange: (extensions: string[]) => void;
   onStartScan: () => void;
   isLoading?: boolean;
+  autoSelectPreferences?: AutoSelectPreferences;
+  onOpenAutoSelectModal?: () => void;
+  onToggleAutoSelect?: (enabled?: boolean) => void;
 }
 
 export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
@@ -48,6 +52,9 @@ export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
   onCustomExtensionsChange,
   onStartScan,
   isLoading = false,
+  autoSelectPreferences,
+  onOpenAutoSelectModal,
+  onToggleAutoSelect,
 }) => {
   // Folder browser state
   const [isBrowserOpen, setIsBrowserOpen] = useState<boolean>(false);
@@ -577,6 +584,71 @@ export const ScanConfigurationCard: React.FC<ScanConfigurationCardProps> = ({
           </div>
         )}
       </div>
+
+      {/* AUTO-SELECT PREFERENCE BANNER */}
+      {autoSelectPreferences && (
+        <div
+          className={`p-3 border rounded-xl flex items-center justify-between gap-2.5 text-xs transition-colors ${
+            autoSelectPreferences.enabled
+              ? 'bg-[#151515] border-[#262626]'
+              : 'bg-[#131313] border-[#242424] opacity-90'
+          }`}
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <SlidersHorizontal
+              className={`w-4 h-4 shrink-0 ${
+                autoSelectPreferences.enabled ? 'text-[#C9A86A]' : 'text-[#777777]'
+              }`}
+            />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-[#A0988E] uppercase tracking-wider font-semibold block">
+                  Auto-Select
+                </span>
+                <span
+                  className={`text-[9px] font-bold px-1.5 py-0.2 rounded uppercase tracking-wider ${
+                    autoSelectPreferences.enabled
+                      ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                      : 'bg-[#262626] text-[#888888] border border-[#333333]'
+                  }`}
+                >
+                  {autoSelectPreferences.enabled ? 'ON' : 'OFF'}
+                </span>
+              </div>
+              <span className="text-xs font-medium text-[#F5E9DC] truncate block">
+                {getKeeperPreferenceSummary(autoSelectPreferences)}
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onToggleAutoSelect && (
+              <button
+                id="btn-scan-card-toggle-auto-select"
+                type="button"
+                onClick={() => onToggleAutoSelect(!autoSelectPreferences.enabled)}
+                className={`text-xs font-semibold px-2.5 py-1 rounded-lg border transition-colors min-h-[36px] flex items-center gap-1 cursor-pointer ${
+                  autoSelectPreferences.enabled
+                    ? 'bg-[#222222] hover:bg-[#2c2c2c] border-[#383838] text-[#F5E9DC]/80 hover:text-[#F5E9DC]'
+                    : 'bg-[#C75B12]/15 hover:bg-[#C75B12]/25 border-[#C75B12]/40 text-[#C75B12]'
+                }`}
+                title={autoSelectPreferences.enabled ? 'Turn Auto-Select OFF' : 'Turn Auto-Select ON'}
+              >
+                <span>{autoSelectPreferences.enabled ? 'Turn Off' : 'Turn On'}</span>
+              </button>
+            )}
+            {onOpenAutoSelectModal && (
+              <button
+                id="btn-scan-card-configure-auto-select"
+                type="button"
+                onClick={onOpenAutoSelectModal}
+                className="text-xs text-[#C75B12] hover:text-[#e06917] font-semibold py-1 px-2.5 rounded-lg bg-[#C75B12]/10 border border-[#C75B12]/30 transition-colors min-h-[36px] flex items-center"
+              >
+                Rules
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* PRIMARY ACTION BUTTON */}
       <div className="pt-3 border-t border-[#262626]">

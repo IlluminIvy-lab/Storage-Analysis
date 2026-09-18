@@ -255,6 +255,25 @@ export function detectContentDivergence(
   const contentTarget = (targetFile.content || '').trim();
   const contentOriginal = (originalFile.content || '').trim();
 
+  // If content is unavailable or unreadable for text comparison
+  if (
+    targetFile.contentStatus === 'unavailable' ||
+    originalFile.contentStatus === 'unavailable' ||
+    targetFile.contentStatus === 'empty' ||
+    originalFile.contentStatus === 'empty'
+  ) {
+    return {
+      hasSignificantDivergence: false,
+      uniqueToTargetCount: 0,
+      uniqueToOriginalCount: 0,
+      uniqueToTargetLines: [],
+      uniqueToOriginalLines: [],
+      divergencePercentage: 0,
+      warningLevel: 'none',
+      summaryMessage: 'Content could not be read for text comparison (e.g. binary/image/scanned PDF).',
+    };
+  }
+
   // If exact identical text or both empty
   if (contentTarget === contentOriginal || (!contentTarget && !contentOriginal)) {
     return {

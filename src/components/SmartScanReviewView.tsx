@@ -16,8 +16,15 @@ import {
   FolderOpen,
   Info,
   Eye,
+  SlidersHorizontal,
+  FolderDown,
+  FileCode,
+  FileText,
+  FileSpreadsheet,
 } from 'lucide-react';
-import { DuplicateMatch, DriveFileItem, CleanupMetrics } from '../types';
+import { DuplicateMatch, DriveFileItem, CleanupMetrics, AutoSelectPreferences } from '../types';
+import { getKeeperPreferenceSummary } from '../lib/autoSelectUtils';
+import { ReportExportFormat } from '../lib/exportReport';
 
 interface SmartScanReviewViewProps {
   folderName: string;
@@ -41,6 +48,12 @@ interface SmartScanReviewViewProps {
   onConfirmTrashApproved: () => void;
   onCancelWorkflow?: () => void;
   onOpenSummary?: () => void;
+  onExportReport?: (format?: ReportExportFormat) => void;
+  onOpenExportModal?: () => void;
+  autoSelectPreferences?: AutoSelectPreferences;
+  onOpenAutoSelectModal?: () => void;
+  onApplyAutoSelectRules?: () => void;
+  onToggleAutoSelect?: (enabled?: boolean) => void;
 }
 
 export const SmartScanReviewView: React.FC<SmartScanReviewViewProps> = ({
@@ -65,6 +78,12 @@ export const SmartScanReviewView: React.FC<SmartScanReviewViewProps> = ({
   onConfirmTrashApproved,
   onCancelWorkflow,
   onOpenSummary,
+  onExportReport,
+  onOpenExportModal,
+  autoSelectPreferences,
+  onOpenAutoSelectModal,
+  onApplyAutoSelectRules,
+  onToggleAutoSelect,
 }) => {
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
 
@@ -119,6 +138,21 @@ export const SmartScanReviewView: React.FC<SmartScanReviewViewProps> = ({
             </button>
           )}
 
+          {(onOpenExportModal || onExportReport) && (
+            <button
+              id="smart-review-export-report-btn"
+              onClick={() => {
+                if (onOpenExportModal) onOpenExportModal();
+                else if (onExportReport) onExportReport('markdown');
+              }}
+              className="px-3.5 py-2.5 rounded-xl bg-[#222222] hover:bg-[#2c2c2c] border border-[#383838] text-[#F5E9DC] text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer min-h-[44px]"
+              title="Download scan plan report as Markdown, Plain Text, or CSV"
+            >
+              <FolderDown className="w-4 h-4 text-[#C75B12]" />
+              <span>Export Report</span>
+            </button>
+          )}
+
           {onCancelWorkflow && (
             <button
               id="cancel-review-btn"
@@ -152,6 +186,52 @@ export const SmartScanReviewView: React.FC<SmartScanReviewViewProps> = ({
             <ShieldCheck className="w-4 h-4 text-emerald-400" />
             <span>Select Safe Only</span>
           </button>
+
+          {onApplyAutoSelectRules && (
+            <button
+              id="smart-review-auto-select-btn"
+              onClick={onApplyAutoSelectRules}
+              className="px-4 py-2.5 rounded-xl bg-[#C75B12]/15 hover:bg-[#C75B12]/25 border border-[#C75B12]/40 text-[#C75B12] text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer min-h-[44px]"
+              title="Select duplicates according to your persistent Auto-Select rules"
+            >
+              <Sparkles className="w-4 h-4 text-[#C75B12]" />
+              <span>Auto-Select</span>
+            </button>
+          )}
+
+          {onToggleAutoSelect && autoSelectPreferences && (
+            <button
+              id="smart-review-toggle-auto-select-btn"
+              type="button"
+              onClick={() => onToggleAutoSelect(!autoSelectPreferences.enabled)}
+              className={`px-3 py-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer min-h-[44px] ${
+                autoSelectPreferences.enabled
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25'
+                  : 'bg-[#222222] border-[#383838] text-[#888888] hover:text-[#F5E9DC]'
+              }`}
+              title={
+                autoSelectPreferences.enabled
+                  ? 'Auto-Select is ON (click to turn OFF)'
+                  : 'Auto-Select is OFF (click to turn ON)'
+              }
+            >
+              <span className="text-[10px] uppercase font-bold tracking-wider">
+                {autoSelectPreferences.enabled ? 'Auto: ON' : 'Auto: OFF'}
+              </span>
+            </button>
+          )}
+
+          {onOpenAutoSelectModal && (
+            <button
+              id="smart-review-auto-select-rules-btn"
+              onClick={onOpenAutoSelectModal}
+              className="px-3 py-2.5 rounded-xl bg-[#242424] hover:bg-[#303030] border border-[#383838] text-[#C9A86A] text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer min-h-[44px]"
+              title={autoSelectPreferences ? getKeeperPreferenceSummary(autoSelectPreferences) : 'Configure Auto-Select rules'}
+            >
+              <SlidersHorizontal className="w-4 h-4 text-[#C9A86A]" />
+              <span className="hidden md:inline">Rules</span>
+            </button>
+          )}
 
           <button
             onClick={onConfirmTrashApproved}
@@ -348,6 +428,13 @@ export const SmartScanReviewView: React.FC<SmartScanReviewViewProps> = ({
                           <span className="text-emerald-400 font-medium">
                             Keeps: {match.originalFile.name}
                           </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#222222] text-[#A0988E] border border-[#333333]">
+                            {match.comparisonMethod === 'size_and_name_match'
+                              ? 'Size & Name Match'
+                              : match.comparisonMethod === 'binary_checksum_match'
+                              ? 'Byte Checksum Match'
+                              : 'Exact Match'}
+                          </span>
                           {isKept && (
                             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
                               <CheckCircle2 className="w-3 h-3" />
@@ -452,8 +539,14 @@ export const SmartScanReviewView: React.FC<SmartScanReviewViewProps> = ({
                           <span className="text-emerald-400 font-medium">
                             Keeps: {match.originalFile.name}
                           </span>
-                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#222222] text-[#A0988E]">
-                            {Math.round(match.similarityScore * 100)}% match
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#222222] text-[#A0988E] border border-[#333333]">
+                            {match.comparisonMethod === 'size_and_name_match'
+                              ? 'Size & Name Match'
+                              : match.comparisonMethod === 'binary_checksum_match'
+                              ? 'Byte Checksum Match'
+                              : match.comparisonMethod === 'none'
+                              ? 'Unreadable'
+                              : `${Math.round(match.similarityScore * 100)}% text match`}
                           </span>
                           {isKept && (
                             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">

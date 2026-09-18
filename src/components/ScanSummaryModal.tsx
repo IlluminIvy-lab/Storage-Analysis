@@ -13,9 +13,14 @@ import {
   ArrowRight,
   Shield,
   Layers,
+  FileCode,
+  FileText,
+  FileSpreadsheet,
+  FolderDown,
 } from 'lucide-react';
 import { DriveFileItem, DuplicateMatch } from '../types';
 import { formatBytes, getEstimatedFileSize } from '../lib/formatters';
+import { ReportExportFormat } from '../lib/exportReport';
 
 interface ScanSummaryModalProps {
   isOpen: boolean;
@@ -28,7 +33,7 @@ interface ScanSummaryModalProps {
   onReviewAllDetails: () => void;
   onSelectExactOnlyAndReview: () => void;
   onKeepEverythingForNow: () => void;
-  onExportReport: () => void;
+  onExportReport: (format?: ReportExportFormat) => void;
 }
 
 export const ScanSummaryModal: React.FC<ScanSummaryModalProps> = ({
@@ -315,24 +320,61 @@ export const ScanSummaryModal: React.FC<ScanSummaryModalProps> = ({
               <span className="text-[11px] text-[#A0988E] font-medium">Safe Exit</span>
             </button>
 
-            {/* Action 4: Export Report First */}
-            <button
-              id="summary-action-export-csv-btn"
-              type="button"
-              onClick={onExportReport}
-              className="w-full p-3 rounded-2xl bg-[#181818] hover:bg-[#222222] border border-[#2e2e2e] text-[#F5E9DC] text-xs font-semibold flex items-center justify-between transition-all cursor-pointer min-h-[44px]"
+            {/* Action 4: Export Report First in multiple formats */}
+            <div
+              id="summary-action-export-panel"
+              className="w-full p-3 rounded-2xl bg-[#181818] border border-[#2e2e2e] text-[#F5E9DC] text-xs space-y-2.5"
             >
-              <div className="flex items-center gap-2.5 text-left">
-                <Download className="w-4 h-4 text-[#C75B12] shrink-0" />
-                <div>
-                  <div className="text-xs font-bold">Export Report First</div>
-                  <div className="text-[11px] text-[#888888]">
-                    Download detailed CSV audit trail before taking any actions
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5 text-left">
+                  <FolderDown className="w-4 h-4 text-[#C75B12] shrink-0" />
+                  <div>
+                    <div className="text-xs font-bold text-[#F5E9DC]">Export Scan Plan First</div>
+                    <div className="text-[11px] text-[#888888]">
+                      Download full proposed audit trail before making any changes
+                    </div>
                   </div>
                 </div>
               </div>
-              <span className="text-[11px] text-[#C75B12] font-semibold">CSV</span>
-            </button>
+
+              <div className="grid grid-cols-3 gap-2 pt-1 border-t border-[#262626]">
+                <button
+                  id="summary-export-md-btn"
+                  type="button"
+                  onClick={() => onExportReport('markdown')}
+                  className="p-2 rounded-xl bg-[#222222] hover:bg-[#2c2c2c] border border-[#333333] text-[#F5E9DC] flex flex-col items-center justify-center gap-1 transition-colors cursor-pointer min-h-[44px]"
+                  title="Download Markdown Document (.md)"
+                >
+                  <FileCode className="w-3.5 h-3.5 text-[#C75B12]" />
+                  <span className="text-[11px] font-bold">Markdown</span>
+                  <span className="text-[9px] text-[#A0988E]">.md</span>
+                </button>
+
+                <button
+                  id="summary-export-txt-btn"
+                  type="button"
+                  onClick={() => onExportReport('text')}
+                  className="p-2 rounded-xl bg-[#222222] hover:bg-[#2c2c2c] border border-[#333333] text-[#F5E9DC] flex flex-col items-center justify-center gap-1 transition-colors cursor-pointer min-h-[44px]"
+                  title="Download Plain Text Document (.txt)"
+                >
+                  <FileText className="w-3.5 h-3.5 text-[#C9A86A]" />
+                  <span className="text-[11px] font-bold">Plain Text</span>
+                  <span className="text-[9px] text-[#A0988E]">.txt</span>
+                </button>
+
+                <button
+                  id="summary-export-csv-btn"
+                  type="button"
+                  onClick={() => onExportReport('csv')}
+                  className="p-2 rounded-xl bg-[#222222] hover:bg-[#2c2c2c] border border-[#333333] text-[#F5E9DC] flex flex-col items-center justify-center gap-1 transition-colors cursor-pointer min-h-[44px]"
+                  title="Download CSV Spreadsheet (.csv)"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-[11px] font-bold">Spreadsheet</span>
+                  <span className="text-[9px] text-[#A0988E]">.csv</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

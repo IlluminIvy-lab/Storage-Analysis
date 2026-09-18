@@ -1,4 +1,4 @@
-import { DriveFileItem, DuplicateMatch } from '../types';
+import { DriveFileItem, DuplicateMatch, AutoSelectPreferences } from '../types';
 import { detectContentDivergence } from './smartFileIntelligence';
 
 /**
@@ -30,19 +30,19 @@ export function getBaseTitle(filename: string): string {
 
 /**
  * Calculates Jaccard similarity coefficient between two sets of word tokens.
+ * Two empty texts or texts without words have 0.0 similarity.
  */
 function calculateJaccardSimilarity(textA: string, textB: string): number {
+  if (!textA || !textB) return 0.0;
   const normA = normalizeText(textA);
   const normB = normalizeText(textB);
 
-  if (!normA && !normB) return 1.0;
   if (!normA || !normB) return 0.0;
   if (normA === normB) return 1.0;
 
   const wordsA = new Set(normA.split(' ').filter((w) => w.length > 2));
   const wordsB = new Set(normB.split(' ').filter((w) => w.length > 2));
 
-  if (wordsA.size === 0 && wordsB.size === 0) return 1.0;
   if (wordsA.size === 0 || wordsB.size === 0) return 0.0;
 
   let intersectionCount = 0;
@@ -58,10 +58,14 @@ function calculateJaccardSimilarity(textA: string, textB: string): number {
 
 /**
  * Calculates n-gram character similarity for tighter sentence/paragraph structure.
+ * Two empty texts have 0.0 similarity.
  */
 function calculateNgramSimilarity(textA: string, textB: string, n = 3): number {
-  if (textA === textB) return 1.0;
   if (!textA || !textB) return 0.0;
+  const trimmedA = textA.trim();
+  const trimmedB = textB.trim();
+  if (!trimmedA || !trimmedB) return 0.0;
+  if (trimmedA === trimmedB) return 1.0;
 
   const getGrams = (str: string) => {
     const s = str.toLowerCase().replace(/\s+/g, ' ');
@@ -73,8 +77,8 @@ function calculateNgramSimilarity(textA: string, textB: string, n = 3): number {
     return grams;
   };
 
-  const gramsA = getGrams(textA);
-  const gramsB = getGrams(textB);
+  const gramsA = getGrams(trimmedA);
+  const gramsB = getGrams(trimmedB);
 
   let intersection = 0;
   let totalA = 0;
@@ -254,6 +258,40 @@ function extractVersionSignals(file: DriveFileItem, otherFile?: DriveFileItem): 
   };
 }
 
+export const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+export const EMPTY_MD5 = 'd41d8cd98f00b204e9800998ecf8427e';
+
+function formatBytes(bytes?: string | number): string {
+  if (bytes === undefined || bytes === null || bytes === '') return 'unknown size';
+  const n = Number(bytes);
+  if (isNaN(n) || n <= 0) return '0 B';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Checks if two filenames are identical or near-identical:
+ * differ only by copy suffixes (e.g. " (1)", " copy", " - Copy") or numeric suffixes ("_1", "-2").
+ */
+export function areFilenamesNearIdentical(nameA: string, nameB: string): boolean {
+  if (nameA.toLowerCase() === nameB.toLowerCase()) return true;
+
+  const extA = nameA.includes('.') ? nameA.substring(nameA.lastIndexOf('.')).toLowerCase() : '';
+  const extB = nameB.includes('.') ? nameB.substring(nameB.lastIndexOf('.')).toLowerCase() : '';
+  if (extA !== extB) return false;
+
+  const baseA = getBaseTitle(nameA);
+  const baseB = getBaseTitle(nameB);
+  if (!baseA || !baseB) return false;
+
+  if (baseA === baseB) return true;
+
+  const cleanA = baseA.replace(/[\s_-]*(copy|\d+)/gi, '').trim();
+  const cleanB = baseB.replace(/[\s_-]*(copy|\d+)/gi, '').trim();
+  return cleanA === cleanB && cleanA.length >= 3;
+}
+
 function escapeRegex(string: string): string {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -261,7 +299,7 @@ function escapeRegex(string: string): string {
 export interface SeniorityDecision {
   keeper: DriveFileItem;
   olderOrDuplicate: DriveFileItem;
-  signalUsed: 'content_statement' | 'modified_timestamp' | 'none';
+  signalUsed: 'content_statement' | 'modified_timestamp' | 'size_and_name' | 'none';
   reason: string;
   isUncertain: boolean;
   uncertaintyReason?: string;
@@ -282,111 +320,179 @@ export interface SeniorityDecision {
 export function decideNewerVersion(
   fileA: DriveFileItem,
   fileB: DriveFileItem,
-  matchType: 'exact' | 'near-duplicate'
+  matchType: 'exact' | 'near-duplicate',
+  preferences?: AutoSelectPreferences
 ): SeniorityDecision {
-  const sigA = extractVersionSignals(fileA, fileB);
-  const sigB = extractVersionSignals(fileB, fileA);
+  const respectContent = preferences?.respectContentSignals ?? true;
+  const sigA = respectContent ? extractVersionSignals(fileA, fileB) : null;
+  const sigB = respectContent ? extractVersionSignals(fileB, fileA) : null;
 
-  // Check rule a: Explicit content signals
-  // 1. Explicit superseding declaration
-  if (sigA.supersedesOther || sigB.supersededByOther) {
-    return {
-      keeper: fileA,
-      olderOrDuplicate: fileB,
-      signalUsed: 'content_statement',
-      reason: `Signal used: Content statement. "${fileA.name}" ${sigA.explicitQuotes.join(' and ')}, superseding "${fileB.name}". This content signal overrides timestamps.`,
-      isUncertain: false,
-    };
+  // Check rule a: Explicit content signals (if respectContent is enabled)
+  if (sigA && sigB) {
+    // 1. Explicit superseding declaration
+    if (sigA.supersedesOther || sigB.supersededByOther) {
+      return {
+        keeper: fileA,
+        olderOrDuplicate: fileB,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Content statement. "${fileA.name}" ${sigA.explicitQuotes.join(' and ')}, superseding "${fileB.name}". This content signal overrides timestamps.`,
+        isUncertain: false,
+      };
+    }
+
+    if (sigB.supersedesOther || sigA.supersededByOther) {
+      return {
+        keeper: fileB,
+        olderOrDuplicate: fileA,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Content statement. "${fileB.name}" ${sigB.explicitQuotes.join(' and ')}, superseding "${fileA.name}". This content signal overrides timestamps.`,
+        isUncertain: false,
+      };
+    }
+
+    // 2. Version numbers comparison (e.g. v2 vs v1)
+    if (sigA.versionNum !== null && sigB.versionNum !== null && sigA.versionNum !== sigB.versionNum) {
+      const aIsNewer = sigA.versionNum > sigB.versionNum;
+      const keeper = aIsNewer ? fileA : fileB;
+      const older = aIsNewer ? fileB : fileA;
+      const keeperSig = aIsNewer ? sigA : sigB;
+      const olderSig = aIsNewer ? sigB : sigA;
+
+      return {
+        keeper,
+        olderOrDuplicate: older,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Content statement. Version number in "${keeper.name}" (${keeperSig.versionNum}) is higher than in "${older.name}" (${olderSig.versionNum}). This overrides timestamps.`,
+        isUncertain: false,
+      };
+    }
+
+    // 3. Final vs Draft status
+    if (sigA.isFinal && sigB.isDraft) {
+      return {
+        keeper: fileA,
+        olderOrDuplicate: fileB,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Content statement. "${fileA.name}" is designated as final/approved, while "${fileB.name}" is marked as a draft. This overrides timestamps.`,
+        isUncertain: false,
+      };
+    }
+
+    if (sigB.isFinal && sigA.isDraft) {
+      return {
+        keeper: fileB,
+        olderOrDuplicate: fileA,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Content statement. "${fileB.name}" is designated as final/approved, while "${fileA.name}" is marked as a draft. This overrides timestamps.`,
+        isUncertain: false,
+      };
+    }
+
+    // 4. Revised vs Draft / Unrevised
+    if (sigA.isRevised && !sigB.isRevised && (sigB.isDraft || sigA.explicitQuotes.length > 0)) {
+      return {
+        keeper: fileA,
+        olderOrDuplicate: fileB,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Content statement. "${fileA.name}" is identified as revised/updated, while "${fileB.name}" is an earlier unrevised copy.`,
+        isUncertain: false,
+      };
+    }
+
+    if (sigB.isRevised && !sigA.isRevised && (sigA.isDraft || sigB.explicitQuotes.length > 0)) {
+      return {
+        keeper: fileB,
+        olderOrDuplicate: fileA,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Content statement. "${fileB.name}" is identified as revised/updated, while "${fileA.name}" is an earlier unrevised copy.`,
+        isUncertain: false,
+      };
+    }
+
+    // If one has a version number and the other is an unmarked draft
+    if (sigA.versionNum !== null && sigB.isDraft && sigB.versionNum === null) {
+      return {
+        keeper: fileA,
+        olderOrDuplicate: fileB,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Content statement. "${fileA.name}" has explicit versioning (v${sigA.versionNum}), whereas "${fileB.name}" is an unversioned draft.`,
+        isUncertain: false,
+      };
+    }
+
+    if (sigB.versionNum !== null && sigA.isDraft && sigA.versionNum === null) {
+      return {
+        keeper: fileB,
+        olderOrDuplicate: fileA,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Content statement. "${fileB.name}" has explicit versioning (v${sigB.versionNum}), whereas "${fileA.name}" is an unversioned draft.`,
+        isUncertain: false,
+      };
+    }
   }
 
-  if (sigB.supersedesOther || sigA.supersededByOther) {
-    return {
-      keeper: fileB,
-      olderOrDuplicate: fileA,
-      signalUsed: 'content_statement',
-      reason: `Signal used: Content statement. "${fileB.name}" ${sigB.explicitQuotes.join(' and ')}, superseding "${fileA.name}". This content signal overrides timestamps.`,
-      isUncertain: false,
-    };
-  }
+  // Evaluate Custom Keeper Preference (if specified and not default 'newer')
+  const keeperPref = preferences?.keeperPreference ?? 'newer';
 
-  // 2. Version numbers comparison (e.g. v2 vs v1)
-  if (sigA.versionNum !== null && sigB.versionNum !== null && sigA.versionNum !== sigB.versionNum) {
-    const aIsNewer = sigA.versionNum > sigB.versionNum;
-    const keeper = aIsNewer ? fileA : fileB;
-    const older = aIsNewer ? fileB : fileA;
-    const keeperSig = aIsNewer ? sigA : sigB;
-    const olderSig = aIsNewer ? sigB : sigA;
-
-    return {
-      keeper,
-      olderOrDuplicate: older,
-      signalUsed: 'content_statement',
-      reason: `Signal used: Content statement. Version number in "${keeper.name}" (${keeperSig.versionNum}) is higher than in "${older.name}" (${olderSig.versionNum}). This overrides timestamps.`,
-      isUncertain: false,
-    };
-  }
-
-  // 3. Final vs Draft status
-  if (sigA.isFinal && sigB.isDraft) {
-    return {
-      keeper: fileA,
-      olderOrDuplicate: fileB,
-      signalUsed: 'content_statement',
-      reason: `Signal used: Content statement. "${fileA.name}" is designated as final/approved, while "${fileB.name}" is marked as a draft. This overrides timestamps.`,
-      isUncertain: false,
-    };
-  }
-
-  if (sigB.isFinal && sigA.isDraft) {
-    return {
-      keeper: fileB,
-      olderOrDuplicate: fileA,
-      signalUsed: 'content_statement',
-      reason: `Signal used: Content statement. "${fileB.name}" is designated as final/approved, while "${fileA.name}" is marked as a draft. This overrides timestamps.`,
-      isUncertain: false,
-    };
-  }
-
-  // 4. Revised vs Draft / Unrevised
-  if (sigA.isRevised && !sigB.isRevised && (sigB.isDraft || sigA.explicitQuotes.length > 0)) {
-    return {
-      keeper: fileA,
-      olderOrDuplicate: fileB,
-      signalUsed: 'content_statement',
-      reason: `Signal used: Content statement. "${fileA.name}" is identified as revised/updated, while "${fileB.name}" is an earlier unrevised copy.`,
-      isUncertain: false,
-    };
-  }
-
-  if (sigB.isRevised && !sigA.isRevised && (sigA.isDraft || sigB.explicitQuotes.length > 0)) {
-    return {
-      keeper: fileB,
-      olderOrDuplicate: fileA,
-      signalUsed: 'content_statement',
-      reason: `Signal used: Content statement. "${fileB.name}" is identified as revised/updated, while "${fileA.name}" is an earlier unrevised copy.`,
-      isUncertain: false,
-    };
-  }
-
-  // If one has a version number and the other is an unmarked draft
-  if (sigA.versionNum !== null && sigB.isDraft && sigB.versionNum === null) {
-    return {
-      keeper: fileA,
-      olderOrDuplicate: fileB,
-      signalUsed: 'content_statement',
-      reason: `Signal used: Content statement. "${fileA.name}" has explicit versioning (v${sigA.versionNum}), whereas "${fileB.name}" is an unversioned draft.`,
-      isUncertain: false,
-    };
-  }
-
-  if (sigB.versionNum !== null && sigA.isDraft && sigA.versionNum === null) {
-    return {
-      keeper: fileB,
-      olderOrDuplicate: fileA,
-      signalUsed: 'content_statement',
-      reason: `Signal used: Content statement. "${fileB.name}" has explicit versioning (v${sigB.versionNum}), whereas "${fileA.name}" is an unversioned draft.`,
-      isUncertain: false,
-    };
+  if (keeperPref === 'largest') {
+    const sizeA = Number(fileA.size) || 0;
+    const sizeB = Number(fileB.size) || 0;
+    if (sizeA !== sizeB) {
+      const aIsKeeper = sizeA > sizeB;
+      const keeper = aIsKeeper ? fileA : fileB;
+      const older = aIsKeeper ? fileB : fileA;
+      return {
+        keeper,
+        olderOrDuplicate: older,
+        signalUsed: 'size_and_name',
+        reason: `Signal used: Preference rule (always prefer largest file size). "${keeper.name}" (${formatBytes(keeper.size)}) is retained as the larger version; "${older.name}" (${formatBytes(older.size)}) is flagged for cleanup.`,
+        isUncertain: false,
+      };
+    }
+  } else if (keeperPref === 'smallest') {
+    const sizeA = Number(fileA.size) || 0;
+    const sizeB = Number(fileB.size) || 0;
+    if (sizeA !== sizeB) {
+      const aIsKeeper = sizeA < sizeB;
+      const keeper = aIsKeeper ? fileA : fileB;
+      const older = aIsKeeper ? fileB : fileA;
+      return {
+        keeper,
+        olderOrDuplicate: older,
+        signalUsed: 'size_and_name',
+        reason: `Signal used: Preference rule (always prefer smallest file size). "${keeper.name}" (${formatBytes(keeper.size)}) is retained as the leanest version; "${older.name}" (${formatBytes(older.size)}) is flagged for cleanup.`,
+        isUncertain: false,
+      };
+    }
+  } else if (keeperPref === 'older') {
+    const timeA = new Date(fileA.modifiedTime).getTime();
+    const timeB = new Date(fileB.modifiedTime).getTime();
+    if (timeA !== timeB) {
+      const aIsKeeper = timeA < timeB;
+      const keeper = aIsKeeper ? fileA : fileB;
+      const older = aIsKeeper ? fileB : fileA;
+      return {
+        keeper,
+        olderOrDuplicate: older,
+        signalUsed: 'modified_timestamp',
+        reason: `Signal used: Preference rule (always prefer older original). "${keeper.name}" was modified earlier on ${new Date(keeper.modifiedTime).toLocaleString()} vs "${older.name}" on ${new Date(older.modifiedTime).toLocaleString()}.`,
+        isUncertain: false,
+      };
+    }
+  } else if (keeperPref === 'cleanest_name') {
+    const isFileACopy = hasCopySuffix(fileA.name);
+    const isFileBCopy = hasCopySuffix(fileB.name);
+    if (isFileACopy !== isFileBCopy) {
+      const keeper = !isFileACopy ? fileA : fileB;
+      const older = isFileACopy ? fileA : fileB;
+      return {
+        keeper,
+        olderOrDuplicate: older,
+        signalUsed: 'content_statement',
+        reason: `Signal used: Preference rule (always prefer cleanest filename). "${keeper.name}" is retained as the clean original, while copy "${older.name}" has a copy suffix.`,
+        isUncertain: false,
+      };
+    }
   }
 
   // FOR EXACT DUPLICATES (byte-identical or identical text):
@@ -413,9 +519,15 @@ export function decideNewerVersion(
       const timeA = new Date(fileA.modifiedTime).getTime();
       const timeB = new Date(fileB.modifiedTime).getTime();
       if (timeA !== timeB) {
-        keeper = timeA >= timeB ? fileA : fileB;
-        older = timeA >= timeB ? fileB : fileA;
-        nameReason = `"${keeper.name}" was modified on ${new Date(keeper.modifiedTime).toLocaleString()} vs "${older.name}" on ${new Date(older.modifiedTime).toLocaleString()}.`;
+        if (keeperPref === 'older') {
+          keeper = timeA < timeB ? fileA : fileB;
+          older = timeA < timeB ? fileB : fileA;
+          nameReason = `"${keeper.name}" was modified earlier on ${new Date(keeper.modifiedTime).toLocaleString()} vs "${older.name}" on ${new Date(older.modifiedTime).toLocaleString()}.`;
+        } else {
+          keeper = timeA >= timeB ? fileA : fileB;
+          older = timeA >= timeB ? fileB : fileA;
+          nameReason = `"${keeper.name}" was modified on ${new Date(keeper.modifiedTime).toLocaleString()} vs "${older.name}" on ${new Date(older.modifiedTime).toLocaleString()}.`;
+        }
       } else {
         keeper = fileA.name.length <= fileB.name.length ? fileA : fileB;
         older = keeper === fileA ? fileB : fileA;
@@ -455,10 +567,11 @@ export function decideNewerVersion(
   }
 
   // Timestamps are more than 5 minutes apart and no content signal was found:
-  // Rule b: Fall back to modified timestamp
+  // Fall back to modified timestamp (respecting keeperPref if 'older')
   const aIsNewer = timeA > timeB;
-  const keeper = aIsNewer ? fileA : fileB;
-  const older = aIsNewer ? fileB : fileA;
+  const isKeeperA = keeperPref === 'older' ? !aIsNewer : aIsNewer;
+  const keeper = isKeeperA ? fileA : fileB;
+  const older = isKeeperA ? fileB : fileA;
   const minutesApart = Math.round(timeDiffMs / (1000 * 60));
   const timeFormatted = minutesApart > 120 
     ? `${Math.round(minutesApart / 60)} hours`
@@ -468,7 +581,7 @@ export function decideNewerVersion(
     keeper,
     olderOrDuplicate: older,
     signalUsed: 'modified_timestamp',
-    reason: `Signal used: Modified timestamp. No explicit version statement in content. "${keeper.name}" was modified more recently on ${new Date(keeper.modifiedTime).toLocaleString()} vs "${older.name}" on ${new Date(older.modifiedTime).toLocaleString()} (${timeFormatted} apart).`,
+    reason: `Signal used: Modified timestamp. No explicit version statement in content. "${keeper.name}" was modified on ${new Date(keeper.modifiedTime).toLocaleString()} vs "${older.name}" on ${new Date(older.modifiedTime).toLocaleString()} (${timeFormatted} apart).`,
     isUncertain: false,
   };
 }
@@ -481,7 +594,7 @@ export function decideNewerVersion(
  */
 export function analyzeDuplicates(
   files: DriveFileItem[],
-  options?: { exactOnly?: boolean }
+  options?: { exactOnly?: boolean; preferences?: AutoSelectPreferences }
 ): {
   actionableMatches: DuplicateMatch[];
   uncertainMatches: DuplicateMatch[];
@@ -508,75 +621,156 @@ export function analyzeDuplicates(
   // as an 'older version' in a different pair in the same scan. Each file should have exactly one resolution per scan."
   const exactResolvedIds = new Set<string>();
 
+  // Helper to validate non-empty, non-trivial hash string
+  const isValidHash = (hash?: string): boolean => {
+    if (!hash) return false;
+    const clean = hash.trim().toLowerCase();
+    return clean.length >= 16 && clean !== EMPTY_SHA256 && clean !== EMPTY_MD5;
+  };
+
   // 1. First Pass: Group by exact hash (checking contentHash and md5Checksum)
-  const hashMap = new Map<string, DriveFileItem[]>();
+  // Only index non-empty files with genuinely valid hashes
+  const shaMap = new Map<string, DriveFileItem[]>();
+  const md5Map = new Map<string, DriveFileItem[]>();
 
   for (const file of sortedFiles) {
-    const keys: string[] = [];
-    if (file.contentHash && file.contentHash.length > 8) {
-      keys.push(`sha256:${file.contentHash.toLowerCase()}`);
-    }
-    if (file.md5Checksum && file.md5Checksum.length > 8) {
-      keys.push(`md5:${file.md5Checksum.toLowerCase()}`);
+    if (file.contentStatus === 'empty' || (file.size !== undefined && Number(file.size) === 0)) {
+      continue; // Never group empty files as exact duplicates
     }
 
-    for (const key of keys) {
-      if (!hashMap.has(key)) {
-        hashMap.set(key, []);
-      }
-      const existing = hashMap.get(key)!;
-      if (!existing.some((f) => f.id === file.id)) {
-        existing.push(file);
-      }
+    if (isValidHash(file.contentHash)) {
+      const key = file.contentHash!.trim().toLowerCase();
+      if (!shaMap.has(key)) shaMap.set(key, []);
+      shaMap.get(key)!.push(file);
+    }
+
+    if (isValidHash(file.md5Checksum)) {
+      const key = file.md5Checksum!.trim().toLowerCase();
+      if (!md5Map.has(key)) md5Map.set(key, []);
+      md5Map.get(key)!.push(file);
     }
   }
 
-  for (const [, group] of hashMap) {
-    if (group.length > 1) {
-      // For each pair in the group, evaluate priority rules
-      for (let i = 0; i < group.length; i++) {
-        const fileA = group[i];
-        if (exactResolvedIds.has(fileA.id)) continue;
+  // Process candidate exact hash groups
+  const processHashGroup = (group: DriveFileItem[]) => {
+    if (group.length <= 1) return;
 
-        for (let j = i + 1; j < group.length; j++) {
-          const fileB = group[j];
-          if (exactResolvedIds.has(fileB.id)) continue;
+    for (let i = 0; i < group.length; i++) {
+      const fileA = group[i];
+      if (exactResolvedIds.has(fileA.id)) continue;
 
-          const decision = decideNewerVersion(fileA, fileB, 'exact');
+      for (let j = i + 1; j < group.length; j++) {
+        const fileB = group[j];
+        if (exactResolvedIds.has(fileB.id)) continue;
 
-          if (decision.isUncertain) {
-            exactResolvedIds.add(fileA.id);
-            exactResolvedIds.add(fileB.id);
-            uncertainMatches.push({
-              id: `uncertain-exact-${fileA.id}-${fileB.id}`,
-              type: 'exact',
-              confidence: 0.5,
-              reason: decision.reason,
-              signalUsed: decision.signalUsed,
-              signalDetails: decision.uncertaintyReason,
-              originalFile: fileA,
-              targetFile: fileB,
-              similarityScore: 1.0,
-              isUncertain: true,
-              uncertaintyReason: decision.uncertaintyReason,
-            });
-          } else {
-            // Mark both keeper and duplicate as resolved in Tier 1 (Exact Duplicates)
-            exactResolvedIds.add(decision.keeper.id);
-            exactResolvedIds.add(decision.olderOrDuplicate.id);
-            actionableMatches.push({
-              id: `exact-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
-              type: 'exact',
-              confidence: 1.0,
-              reason: decision.reason,
-              signalUsed: decision.signalUsed,
-              originalFile: decision.keeper,
-              targetFile: decision.olderOrDuplicate,
-              similarityScore: 1.0,
-              isUncertain: false,
-            });
+        // VERIFICATION 1: File size match (if both sizes known and > 0)
+        const sizeA = fileA.size !== undefined ? Number(fileA.size) : undefined;
+        const sizeB = fileB.size !== undefined ? Number(fileB.size) : undefined;
+        if (sizeA !== undefined && sizeB !== undefined && sizeA > 0 && sizeB > 0 && sizeA !== sizeB) {
+          continue; // Differing sizes can never be exact byte-identical duplicates
+        }
+
+        // VERIFICATION 2: Content text check (if both have extracted text)
+        // Two files with genuinely different content must NEVER be grouped as exact duplicates!
+        if (
+          fileA.contentStatus === 'extracted' &&
+          fileB.contentStatus === 'extracted' &&
+          fileA.content &&
+          fileB.content
+        ) {
+          const normA = normalizeText(fileA.content);
+          const normB = normalizeText(fileB.content);
+          if (normA !== normB && fileA.content.trim() !== fileB.content.trim()) {
+            console.warn(`Content divergence detected between "${fileA.name}" and "${fileB.name}". Bypassing false exact duplicate match.`);
+            continue;
           }
         }
+
+        // Determine comparison method
+        const isBothExtracted = fileA.contentStatus === 'extracted' && fileB.contentStatus === 'extracted';
+        const comparisonMethod = isBothExtracted ? 'text_similarity' : 'binary_checksum_match';
+
+        const decision = decideNewerVersion(fileA, fileB, 'exact', options?.preferences);
+        const isFileACopy = hasCopySuffix(fileA.name);
+        const isFileBCopy = hasCopySuffix(fileB.name);
+        const nameReason = isFileACopy !== isFileBCopy
+          ? `"${decision.keeper.name}" is retained as original, while duplicate copy "${decision.olderOrDuplicate.name}" has a copy suffix.`
+          : `"${decision.keeper.name}" modified ${new Date(decision.keeper.modifiedTime).toLocaleDateString()} vs "${decision.olderOrDuplicate.name}" on ${new Date(decision.olderOrDuplicate.modifiedTime).toLocaleDateString()}.`;
+
+        const detailedReason = isBothExtracted
+          ? `Exact byte/hash-identical duplicate verified by identical content and text. ${nameReason}`
+          : `Exact byte-identical binary file (${formatBytes(fileA.size)}). Verified by identical checksum; content is binary and could not be compared as text. ${nameReason}`;
+
+        exactResolvedIds.add(decision.keeper.id);
+        exactResolvedIds.add(decision.olderOrDuplicate.id);
+
+        actionableMatches.push({
+          id: `exact-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
+          type: 'exact',
+          confidence: 1.0,
+          reason: detailedReason,
+          signalUsed: decision.signalUsed,
+          comparisonMethod,
+          originalFile: decision.keeper,
+          targetFile: decision.olderOrDuplicate,
+          similarityScore: 1.0,
+          isUncertain: false,
+        });
+      }
+    }
+  };
+
+  for (const [, group] of shaMap) {
+    processHashGroup(group);
+  }
+  for (const [, group] of md5Map) {
+    processHashGroup(group);
+  }
+
+  // 1.5. Near-Identical Filename + Exact File Size Match (when content is unavailable)
+  // Per specification: "If filenames are identical or near-identical (e.g. differ only by '(1)', 'copy',
+  // or a numeric suffix) AND file size matches exactly, this can still be flagged as a likely exact duplicate —
+  // but based on file size + name match, not fabricated content similarity, and the reason must say so explicitly"
+  for (let i = 0; i < sortedFiles.length; i++) {
+    const fileA = sortedFiles[i];
+    if (exactResolvedIds.has(fileA.id)) continue;
+
+    for (let j = i + 1; j < sortedFiles.length; j++) {
+      const fileB = sortedFiles[j];
+      if (exactResolvedIds.has(fileB.id)) continue;
+
+      const hasUnavailable = fileA.contentStatus === 'unavailable' || fileB.contentStatus === 'unavailable';
+      if (!hasUnavailable) continue; // Both have extracted content, belongs in text comparison pass
+
+      const isNearName = areFilenamesNearIdentical(fileA.name, fileB.name);
+      const sizeA = fileA.size !== undefined ? Number(fileA.size) : 0;
+      const sizeB = fileB.size !== undefined ? Number(fileB.size) : 0;
+      const hasMatchingSize = sizeA > 0 && sizeA === sizeB;
+
+      if (isNearName && hasMatchingSize) {
+        const decision = decideNewerVersion(fileA, fileB, 'exact', options?.preferences);
+        const isFileACopy = hasCopySuffix(fileA.name);
+        const isFileBCopy = hasCopySuffix(fileB.name);
+        const nameReason = isFileACopy !== isFileBCopy
+          ? `"${decision.keeper.name}" is retained as original, while copy "${decision.olderOrDuplicate.name}" has a copy suffix.`
+          : `Both files share identical size (${formatBytes(fileA.size)}).`;
+
+        exactResolvedIds.add(decision.keeper.id);
+        exactResolvedIds.add(decision.olderOrDuplicate.id);
+
+        actionableMatches.push({
+          id: `size-match-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
+          type: 'exact',
+          confidence: 0.90,
+          reason: `Matched by identical file size (${formatBytes(fileA.size)}) and near-identical filename — content could not be read for verification. ${nameReason}`,
+          signalUsed: 'size_and_name',
+          comparisonMethod: 'size_and_name_match',
+          originalFile: decision.keeper,
+          targetFile: decision.olderOrDuplicate,
+          similarityScore: 1.0,
+          isUncertain: false,
+        });
+        break;
       }
     }
   }
@@ -595,14 +789,7 @@ export function analyzeDuplicates(
         const fileB = remainingFiles[j];
         if (pass2ResolvedIds.has(fileB.id)) continue;
 
-        // Skip comparing completely different media types if neither has text content
-        if (fileA.mimeType !== fileB.mimeType && !fileA.content && !fileB.content) {
-          continue;
-        }
-
         const titleSim = calculateTitleSimilarity(fileA.name, fileB.name);
-        const textA = fileA.content || '';
-        const textB = fileB.content || '';
         const baseA = getBaseTitle(fileA.name);
         const baseB = getBaseTitle(fileB.name);
 
@@ -610,7 +797,44 @@ export function analyzeDuplicates(
           titleSim >= 0.50 ||
           (baseA.length > 2 && baseB.length > 2 && (baseA === baseB || baseA.includes(baseB) || baseB.includes(baseA)));
 
-        // Calculate content similarity
+        const hasRealContentA =
+          fileA.contentStatus === 'extracted' && !!fileA.content && fileA.content.trim().length >= 15;
+        const hasRealContentB =
+          fileB.contentStatus === 'extracted' && !!fileB.content && fileB.content.trim().length >= 15;
+
+        // RULE: If either file has unavailable content, NEVER auto-resolve via content similarity or fall back to timestamp.
+        if (!hasRealContentA || !hasRealContentB) {
+          if (hasTitleRelationship) {
+            // Flag as "Uncertain — Content Not Readable" and require manual review. Never guess.
+            const unreadableMatch: DuplicateMatch = {
+              id: `uncertain-unreadable-${fileA.id}-${fileB.id}`,
+              type: 'near-duplicate',
+              confidence: 0.5,
+              reason: `Uncertain — Content Not Readable: Content could not be extracted for verification between "${fileA.name}" and "${fileB.name}". Left safely in place for manual review.`,
+              signalUsed: 'none',
+              comparisonMethod: 'none',
+              originalFile: fileA,
+              targetFile: fileB,
+              similarityScore: 0,
+              isUncertain: true,
+              hasSignificantDivergence: true,
+              uncertaintyReason: `Content is unavailable or not extractable (e.g. scanned PDF, image, archive, or unreadable format). Safety rules prohibit auto-resolving without verified readable content.`,
+            };
+            actionableMatches.push(unreadableMatch);
+            uncertainMatches.push(unreadableMatch);
+            pass2ResolvedIds.add(fileA.id);
+            pass2ResolvedIds.add(fileB.id);
+            break;
+          }
+          // No title relationship and unreadable content: skip completely
+          continue;
+        }
+
+        // Both files have real extracted text!
+        const textA = fileA.content!;
+        const textB = fileB.content!;
+
+        // Calculate real content similarity
         const jaccardSim = calculateJaccardSimilarity(textA, textB);
         const ngramSim = calculateNgramSimilarity(textA, textB, 3);
         const contentSim = Math.max(jaccardSim, ngramSim);
@@ -619,9 +843,6 @@ export function analyzeDuplicates(
         // Content-signal keyword matching (draft/final/revised/supersedes keywords) must only be
         // evaluated as a possible version-pair AFTER a minimum content similarity threshold is met
         // (require at least 50% content overlap as a prerequisite gate).
-        // The keyword signal should only decide DIRECTION (which one is newer) between two documents
-        // already confirmed to be substantively about the same subject matter, never as the sole basis
-        // for pairing two documents together in the first place.
         const meetsContentGate = contentSim >= 0.50;
 
         // Two documents are confirmed to be substantively about the same subject matter if:
@@ -632,26 +853,24 @@ export function analyzeDuplicates(
           contentSim >= 0.70;
 
         if (!isConfirmedSameSubject) {
-          // Unrelated documents (e.g. 36% match without title relationship) fail the prerequisite gate and are ignored
+          // Unrelated documents fail the prerequisite gate and are ignored
           continue;
         }
 
         // The documents ARE confirmed to be substantively about the same subject matter!
         // Now evaluate version seniority (content signal or timestamp determines DIRECTION):
-        const decision = decideNewerVersion(fileA, fileB, 'near-duplicate');
-        const hasContentSignal = decision.signalUsed === 'content_statement';
+        const decision = decideNewerVersion(fileA, fileB, 'near-duplicate', options?.preferences);
+        const simPercent = Math.round(contentSim * 100);
+        const textComparedReason = `Compared real text content: ${simPercent}% content similarity. ${decision.reason}`;
 
         if (decision.isUncertain) {
-          // Timestamp proximity (<= 5 minutes) without content signal:
-          // Treat timestamp as unreliable, BUT DO NOT DROP SILENTLY.
-          // Flag as uncertain in Divergent Versions for manual verification so the user is alerted
-          // and files are never silently kept without review.
           const uncertainMatch: DuplicateMatch = {
             id: `uncertain-version-${fileA.id}-${fileB.id}`,
             type: 'near-duplicate',
             confidence: 0.5,
-            reason: decision.reason,
+            reason: textComparedReason,
             signalUsed: decision.signalUsed,
+            comparisonMethod: 'text_similarity',
             originalFile: fileA,
             targetFile: fileB,
             similarityScore: contentSim,
@@ -670,9 +889,10 @@ export function analyzeDuplicates(
           actionableMatches.push({
             id: `version-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
             type: 'near-duplicate',
-            confidence: hasContentSignal ? 0.98 : Math.min(0.95, 0.7 + contentSim * 0.25),
-            reason: decision.reason,
+            confidence: decision.signalUsed === 'content_statement' ? 0.98 : Math.min(0.95, 0.7 + contentSim * 0.25),
+            reason: textComparedReason,
             signalUsed: decision.signalUsed,
+            comparisonMethod: 'text_similarity',
             originalFile: decision.keeper,
             targetFile: decision.olderOrDuplicate,
             similarityScore: contentSim,
@@ -684,12 +904,10 @@ export function analyzeDuplicates(
     }
   }
 
-  // Unique files: all files that were not trashed or targeted as older drafts, plus protected key files
+  // Unique files: all files that were not trashed or targeted as older drafts
+  // (Note: 00_README.txt and protected key files are fully excluded and must not appear in uniqueFiles or reports)
   const trashedTargetIds = new Set(actionableMatches.map((m) => m.targetFile.id));
-  const uniqueFiles = [
-    ...protectedFiles,
-    ...sortedFiles.filter((f) => !trashedTargetIds.has(f.id)),
-  ];
+  const uniqueFiles = sortedFiles.filter((f) => !trashedTargetIds.has(f.id));
 
   // Enrich each match with content divergence analysis
   const enrichWithDivergence = (m: DuplicateMatch): DuplicateMatch => {
@@ -706,6 +924,21 @@ export function analyzeDuplicates(
       ? false
       : (m.isUncertain || divergence.hasSignificantDivergence);
 
+    let summaryMessage = '';
+    if (m.comparisonMethod === 'size_and_name_match') {
+      summaryMessage = 'Matched by identical file size and near-identical filename — content could not be read for verification.';
+    } else if (m.comparisonMethod === 'binary_checksum_match') {
+      summaryMessage = 'Exact byte-identical binary file. Verified by identical checksum.';
+    } else if (m.isUncertain && m.comparisonMethod === 'none') {
+      summaryMessage = 'Uncertain — Content Not Readable. Manual review required.';
+    } else if (m.type === 'exact') {
+      summaryMessage = 'Exact byte/hash-identical duplicate. 100% safe to clean.';
+    } else if (m.signalUsed === 'content_statement') {
+      summaryMessage = `Confident resolution via content signal: ${m.reason}`;
+    } else {
+      summaryMessage = divergence.summaryMessage;
+    }
+
     return {
       ...m,
       hasSignificantDivergence,
@@ -714,12 +947,12 @@ export function analyzeDuplicates(
             ...divergence,
             hasSignificantDivergence: false,
             warningLevel: 'none',
-            summaryMessage:
-              m.type === 'exact'
-                ? 'Exact byte/hash-identical duplicate. 100% safe to clean.'
-                : `Confident resolution via content signal: ${m.reason}`,
+            summaryMessage,
           }
-        : divergence,
+        : {
+            ...divergence,
+            summaryMessage,
+          },
     };
   };
 

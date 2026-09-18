@@ -1,3 +1,5 @@
+export type ContentStatus = 'extracted' | 'unavailable' | 'empty';
+
 export interface DriveFileItem {
   id: string;
   name: string;
@@ -8,6 +10,8 @@ export interface DriveFileItem {
   parents?: string[];
   content?: string;
   contentHash?: string;
+  contentStatus?: ContentStatus;
+  extractedWordCount?: number;
   trashed?: boolean;
   summaryDescription?: string;
   suggestedFolder?: {
@@ -80,8 +84,9 @@ export interface DuplicateMatch {
   type: DuplicateType;
   confidence: number; // 0 to 1
   reason: string;
-  signalUsed?: 'content_statement' | 'modified_timestamp' | 'none';
+  signalUsed?: 'content_statement' | 'modified_timestamp' | 'size_and_name' | 'none';
   signalDetails?: string;
+  comparisonMethod?: 'text_similarity' | 'size_and_name_match' | 'binary_checksum_match' | 'none';
   originalFile: DriveFileItem; // The most recently modified or verified newer copy to KEEP
   targetFile: DriveFileItem;   // The older or superseded copy to TRASH
   similarityScore: number;
@@ -107,6 +112,7 @@ export interface CleanupMetrics {
 export interface CleanupReport {
   timestamp: string;
   folderName: string;
+  isProposedReport?: boolean;
   totalFilesReviewed: number;
   totalExactDuplicates: number;
   totalVersionDrafts: number;
@@ -121,9 +127,11 @@ export interface CleanupReport {
     keptOriginalFile: DriveFileItem;
     type: DuplicateType;
     reason: string;
-    signalUsed?: 'content_statement' | 'modified_timestamp' | 'none';
+    signalUsed?: 'content_statement' | 'modified_timestamp' | 'size_and_name' | 'none';
+    comparisonMethod?: 'text_similarity' | 'size_and_name_match' | 'binary_checksum_match' | 'none';
     similarity: number;
     trashedSuccess: boolean;
+    isProposed?: boolean;
     error?: string;
   }>;
   uncertainFiles: Array<{
@@ -131,6 +139,7 @@ export interface CleanupReport {
     fileB: DriveFileItem;
     reason: string;
     similarity: number;
+    comparisonMethod?: 'text_similarity' | 'size_and_name_match' | 'binary_checksum_match' | 'none';
   }>;
   keptFiles: DriveFileItem[];
 }
@@ -146,3 +155,31 @@ export type ScanStage =
   | 'trashing'
   | 'completed'
   | 'error';
+
+export type KeeperPreference = 'newer' | 'older' | 'largest' | 'smallest' | 'cleanest_name';
+
+export interface AutoSelectPreferences {
+  enabled: boolean; // Master toggle: true = auto-select duplicates for cleanup; false = OFF (manual selection only)
+  keeperPreference: KeeperPreference;
+  secondaryPreference: KeeperPreference;
+  respectContentSignals: boolean; // if true, explicit v2/v1 or "final" in content takes precedence
+  autoSelectExact: boolean; // Auto-select 100% exact / checksum duplicates
+  autoSelectDrafts: boolean; // Auto-select near-duplicate drafts
+  autoSelectDivergent: boolean; // Auto-select divergent files with unique edits (default false for safety)
+  minSimilarityThreshold: number; // 0.5 to 1.0 (e.g. 0.75)
+  autoSelectUncertain: boolean; // Auto-select uncertain matches (default false for safety)
+  autoApplyOnScan: boolean; // Automatically apply upon scan completion
+}
+
+export const DEFAULT_AUTO_SELECT_PREFERENCES: AutoSelectPreferences = {
+  enabled: true,
+  keeperPreference: 'newer',
+  secondaryPreference: 'largest',
+  respectContentSignals: true,
+  autoSelectExact: true,
+  autoSelectDrafts: true,
+  autoSelectDivergent: false,
+  minSimilarityThreshold: 0.75,
+  autoSelectUncertain: false,
+  autoApplyOnScan: true,
+};
